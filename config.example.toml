@@ -17,8 +17,9 @@ command_prefix = "vp!"
 # Start with the bridge on (true) or off (false). vp!toggle changes it.
 start_enabled = true
 
-# Link voice channels that have the same name on both platforms (case and
-# outer spaces are ignored). The [[links]] entries below are used first.
+# Link voice channels that have the same name on both platforms (outer
+# spaces are ignored, but names are case-sensitive). The [[links]] entries
+# below are used first.
 match_by_name = true
 
 # Nickname of the main bot when it speaks for users that have no proxy.

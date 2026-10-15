@@ -42,8 +42,8 @@ joins together. The bridge finds links in two ways:
 
 1. Fixed links from the `[[links]]` entries in `config.toml`.
 2. Channels with the same name on both platforms (when `match_by_name` is
-   `true`). Case and outer spaces are ignored, so `General` matches
-   ` general `.
+   `true`). Outer spaces are ignored, but names are case-sensitive (for
+   example, `General` matches ` General `, but does not match `general`).
 
 The bridge can run many links at the same time. The proxy pool is shared
 between all links. The main bot can be in only one voice channel for each

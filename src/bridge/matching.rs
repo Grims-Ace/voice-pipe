@@ -71,14 +71,14 @@ fn FindFixedPairs<'a>(
         pairs
 }
 
-// Pair the remaining channels that have the same name (case and outer
-// spaces are ignored).
+// Pair the remaining channels that have the same name (outer spaces are
+// ignored, but case is sensitive).
 fn FindNamePairs<'a>(
         discord: &'a [VoiceChannel],
         fluxer: &'a [VoiceChannel],
         used: &mut HashSet<&'a str>,
 ) -> Vec<ChannelPair> {
-        let mut fluxer_by_name: HashMap<String, &VoiceChannel> = HashMap::new();
+        let mut fluxer_by_name: HashMap<&str, &VoiceChannel> = HashMap::new();
         for channel in fluxer.iter().filter(|c| !used.contains(c.getId())) {
                 fluxer_by_name
                         .entry(NormalizeName(channel.getName()))
@@ -89,7 +89,7 @@ fn FindNamePairs<'a>(
         let mut pairs = Vec::new();
         for d in free {
                 let Some(f) =
-                        fluxer_by_name.remove(&NormalizeName(d.getName()))
+                        fluxer_by_name.remove(NormalizeName(d.getName()))
                 else {
                         continue;
                 };
@@ -102,7 +102,7 @@ fn FindNamePairs<'a>(
 // Return the names that two or more voice channels share. Name matching
 // uses the first of these channels in the channel list.
 pub fn FindDuplicateNames(channels: &[VoiceChannel]) -> Vec<String> {
-        let mut counts: HashMap<String, (usize, &str)> = HashMap::new();
+        let mut counts: HashMap<&str, (usize, &str)> = HashMap::new();
         for channel in channels {
                 let name = NormalizeName(channel.getName());
                 counts.entry(name).or_insert((0, channel.getName())).0 += 1;
@@ -116,7 +116,7 @@ pub fn FindDuplicateNames(channels: &[VoiceChannel]) -> Vec<String> {
         names
 }
 
-fn NormalizeName(name: &str) -> String { name.trim().to_lowercase() }
+fn NormalizeName(name: &str) -> &str { name.trim() }
 
 #[cfg(test)]
 mod tests {
@@ -138,7 +138,7 @@ mod tests {
         #[test]
         fn SameNamesArePaired() {
                 let d = Channels(&[("1", "General"), ("2", "Games")]);
-                let f = Channels(&[("a", " general "), ("b", "Music")]);
+                let f = Channels(&[("a", " General "), ("b", "Music")]);
                 let pairs = FindPairs(&[], true, &d, &f);
                 assert_eq!(pairs.len(), 1);
                 assert_eq!(pairs[0].getKey(), &LinkKey::New("1", "a"));
@@ -153,8 +153,16 @@ mod tests {
         }
 
         #[test]
+        fn CaseMismatchDoesNotPair() {
+                let d = Channels(&[("1", "General")]);
+                let f = Channels(&[("a", "general")]);
+                let pairs = FindPairs(&[], true, &d, &f);
+                assert!(pairs.is_empty());
+        }
+
+        #[test]
         fn FirstOfTwoSameNamesWins() {
-                let d = Channels(&[("1", "General"), ("2", "general")]);
+                let d = Channels(&[("1", "General"), ("2", " General ")]);
                 let f = Channels(&[("a", "General")]);
                 let pairs = FindPairs(&[], true, &d, &f);
                 assert_eq!(pairs.len(), 1);
