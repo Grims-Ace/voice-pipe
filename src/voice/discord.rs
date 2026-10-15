@@ -96,7 +96,7 @@ impl DiscordVoice {
                 let info = BuildConnectionInfo(server, target)?;
                 let is_listening = Arc::new(AtomicBool::new(false));
                 let is_connected = Arc::new(AtomicBool::new(true));
-                let mut driver = Driver::new(BuildConfig(false));
+                let mut driver = Driver::new(BuildConfig());
                 AddReceiveEvents(&mut driver, target, is_listening.clone());
                 AddConnectionEvents(&mut driver, is_connected.clone());
                 driver.connect(info).await.map_err(|e| {
@@ -124,18 +124,10 @@ impl DiscordVoice {
                 let _ = self._output.try_send(frame);
         }
 
-        // Decode received audio only while the bot listens, because decoding
-        // costs CPU time and the bridge must not record audio without need.
+        // Receive audio only while the bot listens. VoiceReceiver checks
+        // this flag on every voice tick.
         pub fn SetListening(&self, is_listening: bool) {
-                if self._isListening.swap(is_listening, Ordering::Relaxed)
-                        == is_listening
-                {
-                        return;
-                }
-                self._driver
-                        .lock()
-                        .unwrap()
-                        .set_config(BuildConfig(is_listening));
+                self._isListening.store(is_listening, Ordering::Relaxed);
         }
 
         pub fn Close(self) { self._driver.lock().unwrap().leave(); }
@@ -274,15 +266,10 @@ impl MediaSource for PcmSource {
 // Helper Functions
 // ============================================================================
 
-// Decode received audio to 48 kHz stereo only while the bot listens. Pass
-// mode does no decryption and no decoding.
-fn BuildConfig(is_listening: bool) -> Config {
-        let mode = if is_listening {
-                DecodeMode::Decode(DecodeConfig::default())
-        } else {
-                DecodeMode::Pass
-        };
-        Config::default().decode_mode(mode)
+// Decode received audio to 48 kHz stereo.
+fn BuildConfig() -> Config {
+        Config::default()
+                .decode_mode(DecodeMode::Decode(DecodeConfig::default()))
 }
 
 fn BuildConnectionInfo(
