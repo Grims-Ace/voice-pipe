@@ -9,12 +9,12 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use super::hub::Hub;
 use crate::gateway::{Gateway, INTENT_GUILD_VOICE_STATES, INTENT_GUILDS};
 use crate::platform::Platform;
-use crate::rest::{RestClient, UserProfile};
+use crate::rest::{NICKNAME_MAX, RestClient, Truncate, UserProfile};
 use crate::voice::{VoiceConnection, VoiceTarget};
 
 // ============================================================================
@@ -38,6 +38,7 @@ pub struct ProxyAccount {
         _token: String,
         _botId: String,
         _rest: RestClient,
+        _idleName: Option<String>,
         _avatarUserId: Option<String>,
 }
 
@@ -65,12 +66,35 @@ pub struct ProxySession {
 impl ProxyAccount {
         pub fn getBotId(&self) -> &str { &self._botId }
 
-        pub fn New(token: &str, bot_id: &str, rest: RestClient) -> Self {
+        // `idle_name` is the nickname of the proxy while it mirrors nobody.
+        pub fn New(
+                token: &str,
+                bot_id: &str,
+                rest: RestClient,
+                idle_name: Option<String>,
+        ) -> Self {
                 Self {
                         _token: token.to_string(),
                         _botId: bot_id.to_string(),
                         _rest: rest,
+                        _idleName: idle_name
+                                .map(|n| Truncate(&n, NICKNAME_MAX)),
                         _avatarUserId: None,
+                }
+        }
+
+        // Set the idle nickname, so that a free proxy does not keep the
+        // name of the last person that it mirrored.
+        pub async fn SetIdleName(&self, guild_id: &str) {
+                let name = self._idleName.as_deref();
+                let (rest, bot) = (&self._rest, &self._botId);
+                let result = rest.SetNickname(guild_id, bot, name).await;
+                if let Err(e) = result {
+                        warn!(
+                                bot = %self._botId,
+                                error = %e,
+                                "cannot set idle name",
+                        );
                 }
         }
 }
@@ -177,23 +201,13 @@ impl ProxySession {
                 }
         }
 
-        // Leave voice, log out, and remove the nickname. Return the account
+        // Leave voice, log out, and set the idle name. Return the account
         // for the pool.
         pub async fn Close(self) -> ProxyAccount {
                 self._voice.Close().await;
                 self._gateway.LeaveVoice(&self._guildId);
                 self._gateway.Close().await;
-                let rest = &self._account._rest;
-                if let Err(e) = rest
-                        .SetNickname(
-                                &self._guildId,
-                                &self._account._botId,
-                                None,
-                        )
-                        .await
-                {
-                        debug!(error = %e, "cannot remove proxy nickname");
-                }
+                self._account.SetIdleName(&self._guildId).await;
                 self._account
         }
 }

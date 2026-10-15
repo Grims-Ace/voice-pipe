@@ -38,6 +38,7 @@ const FLUXER_AVATAR_URL: &str =
 
 const DEFAULT_PREFIX: &str = "vp!";
 const DEFAULT_OVERFLOW_NAME: &str = "Multiple Users";
+const DEFAULT_PROXY_IDLE_NAME: &str = "Voice Pipe Proxy {number}";
 const DEFAULT_LOG_LEVEL: &str = "info";
 const DEFAULT_VOICE_THRESHOLD: f32 = 200.0;
 const DEFAULT_HANGOVER_MS: u64 = 300;
@@ -59,6 +60,8 @@ pub struct GeneralSettings {
         _isNameMatchEnabled: bool,
         #[serde(rename = "overflow_name")]
         _overflowName: String,
+        #[serde(rename = "proxy_idle_name")]
+        _proxyIdleName: String,
         #[serde(rename = "log_level")]
         _logLevel: String,
         #[serde(rename = "voice_threshold")]
@@ -136,6 +139,14 @@ impl GeneralSettings {
                 Duration::from_millis(self._silenceHangoverMs)
         }
 
+        // Return the nickname of a free proxy. `number` is the position of
+        // its token in proxy_tokens, from 1. None removes the nickname.
+        pub fn getProxyIdleName(&self, number: usize) -> Option<String> {
+                let number = number.to_string();
+                let name = self._proxyIdleName.replace("{number}", &number);
+                Some(name).filter(|n| !n.trim().is_empty())
+        }
+
         // Correct values that are out of range, and tell the operator.
         fn Validate(&mut self) -> Result<()> {
                 if self._commandPrefix.trim().is_empty() {
@@ -160,6 +171,7 @@ impl Default for GeneralSettings {
                         _isStartEnabled: true,
                         _isNameMatchEnabled: true,
                         _overflowName: DEFAULT_OVERFLOW_NAME.into(),
+                        _proxyIdleName: DEFAULT_PROXY_IDLE_NAME.into(),
                         _logLevel: DEFAULT_LOG_LEVEL.into(),
                         _voiceThreshold: DEFAULT_VOICE_THRESHOLD,
                         _silenceHangoverMs: DEFAULT_HANGOVER_MS,
@@ -395,6 +407,13 @@ mod tests {
                         .replace("main_token = \"\"", "main_token = \"t\"");
                 let config = Parse(&text);
                 assert_eq!(config.getGeneral().getCommandPrefix(), "vp!");
+        }
+
+        #[test]
+        fn IdleNameGetsNumber() {
+                let general = GeneralSettings::default();
+                let name = general.getProxyIdleName(2);
+                assert_eq!(name.as_deref(), Some("Voice Pipe Proxy 2"));
         }
 
         #[test]

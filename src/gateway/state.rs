@@ -53,6 +53,15 @@ impl GatewayState {
                         .collect()
         }
 
+        // Return the voice channel that a user is in, if any.
+        pub fn getUserChannel(
+                &self,
+                guild_id: &str,
+                user: &str,
+        ) -> Option<String> {
+                self._guilds.get(guild_id)?._userChannels.get(user).cloned()
+        }
+
         // Return the IDs of all users in a voice channel, bots included.
         pub fn getChannelUsers(
                 &self,

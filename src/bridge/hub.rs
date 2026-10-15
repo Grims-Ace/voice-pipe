@@ -16,7 +16,7 @@ use tracing::{error, info};
 
 use super::link::LinkKey;
 use super::proxy::{ProxyAccount, ProxyPool};
-use crate::config::{Config, PlatformSettings};
+use crate::config::{Config, GeneralSettings, PlatformSettings};
 use crate::gateway::{
         Gateway, GatewaySettings, INTENT_GUILD_MESSAGES,
         INTENT_GUILD_VOICE_STATES, INTENT_GUILDS, INTENT_MESSAGE_CONTENT,
@@ -109,9 +109,12 @@ impl PlatformHub {
                 let main_id = rest.FetchSelfId().await.with_context(|| {
                         format!("{platform} login failed, check token, api_url")
                 })?;
+                let tokens = settings.getProxyTokens();
+                let general = config.getGeneral();
                 let proxies =
-                        FindProxies(&rest, settings.getProxyTokens(), &main_id)
-                                .await;
+                        FindProxies(&rest, tokens, &main_id, general).await;
+                let guild_id = settings.getGuildId();
+                join_all(proxies.iter().map(|p| p.SetIdleName(guild_id))).await;
                 let mut bot_ids: HashSet<String> = proxies
                         .iter()
                         .map(|p| p.getBotId().to_string())
@@ -269,6 +272,7 @@ async fn FindProxies(
         rest: &RestClient,
         tokens: &[String],
         main_id: &str,
+        general: &GeneralSettings,
 ) -> Vec<ProxyAccount> {
         let lookups = tokens.iter().map(|token| async move {
                 let client = rest.WithToken(token);
@@ -282,8 +286,12 @@ async fn FindProxies(
                         Ok(id) if id == main_id => {
                                 error!(index = i, "proxy token is the main bot")
                         }
-                        Ok(id) => accounts
-                                .push(ProxyAccount::New(token, &id, client)),
+                        Ok(id) => {
+                                let name = general.getProxyIdleName(i + 1);
+                                accounts.push(ProxyAccount::New(
+                                        token, &id, client, name,
+                                ));
+                        }
                         Err(e) => {
                                 error!(
                                         platform = %rest.getPlatform(),

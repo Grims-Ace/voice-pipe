@@ -68,8 +68,9 @@ server, so only one link at a time can use it for overflow.
    *listener*. Only the listener receives audio. The bridge gives the audio
    of each speaker to the mirror of that speaker on the other platform.
    Overflow speakers are mixed together and the main bot plays the mix.
-3. **A person leaves.** Their mirror leaves. When both channels are empty,
-   the link stops and all of its bots leave.
+3. **A person leaves.** Their mirror leaves, and the proxy gets its idle
+   nickname again (`Voice Pipe Proxy 1`, `Voice Pipe Proxy 2`, ...). When
+   both channels are empty, the link stops and all of its bots leave.
 
 ### Audio only when it is necessary
 
@@ -226,6 +227,7 @@ Optional settings:
 | `general.start_enabled` | `true` | Start with the bridge on |
 | `general.match_by_name` | `true` | Link channels with the same name |
 | `general.overflow_name` | `Multiple Users` | Nickname of the overflow bot |
+| `general.proxy_idle_name` | `Voice Pipe Proxy {number}` | Nickname of a free proxy |
 | `general.voice_threshold` | `200` | Level below which audio is silence |
 | `general.silence_hangover_ms` | `300` | Send time after speech stops |
 | `general.jitter_frames` | `3` | Overflow mixer buffer (20 ms frames) |
@@ -319,6 +321,7 @@ it.
 | `close code 4004` | A token is not correct. Copy it again. |
 | `discord login failed` or `fluxer login failed` | The token or `api_url` is wrong, or Fluxer is not running. |
 | `did not send guild` | The bot is not in the server, or `guild_id` is wrong. |
+| `no answer to the join` | Discord ignored the voice join. Check the Connect permission (not only View Channel) and the user limit of the channel, because bots count toward it. |
 | `proxy token does not work` | That proxy token is not correct. The bridge skips it. |
 | Proxy joins but has the wrong name | The bot needs the Change Nickname permission. |
 | Fluxer avatar does not copy | Check `avatar_url` against the avatar URLs of the Fluxer web app. |

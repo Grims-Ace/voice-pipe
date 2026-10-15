@@ -24,6 +24,10 @@ match_by_name = true
 # Nickname of the main bot when it speaks for users that have no proxy.
 overflow_name = "Multiple Users"
 
+# Nickname of a proxy while it mirrors nobody. {number} is the position of
+# its token in proxy_tokens (1, 2, 3, ...). Set "" to remove the nickname.
+proxy_idle_name = "Voice Pipe Proxy {number}"
+
 # Log filter: error, warn, info, debug, or a tracing filter such as
 # "info,voice_pipe=debug". The RUST_LOG variable replaces this value.
 log_level = "info"

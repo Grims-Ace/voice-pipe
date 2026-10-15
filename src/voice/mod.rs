@@ -117,9 +117,15 @@ impl VoiceConnection {
                 gateway: &Gateway,
                 target: &VoiceTarget,
         ) -> Result<VoiceConnection> {
-                let server = gateway
-                        .JoinVoice(&target._guildId, &target._channelId)
-                        .await?;
+                let joined =
+                        gateway.JoinVoice(&target._guildId, &target._channelId);
+                let server = match joined.await {
+                        Ok(server) => server,
+                        Err(e) => {
+                                gateway.LeaveVoice(&target._guildId);
+                                return Err(e);
+                        }
+                };
                 let result = match target._platform {
                         Platform::Discord => {
                                 DiscordVoice::Connect(&server, target)

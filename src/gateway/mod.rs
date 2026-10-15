@@ -18,7 +18,7 @@ use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use tokio::sync::{Notify, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 pub use protocol::{
         INTENT_GUILD_MESSAGES, INTENT_GUILD_VOICE_STATES, INTENT_GUILDS,
@@ -39,7 +39,11 @@ use state::GatewayState;
 // ============================================================================
 
 // Time limit for the server to send the voice server after a join request.
-const JOIN_TIMEOUT: Duration = Duration::from_secs(15);
+const JOIN_TIMEOUT: Duration = Duration::from_secs(10);
+// Wait time between a leave and the second join request.
+const REJOIN_DELAY: Duration = Duration::from_secs(2);
+// Time limit for the server to confirm that an old voice state is gone.
+const STALE_LEAVE_TIMEOUT: Duration = Duration::from_secs(5);
 // Time limit for the session task to say goodbye to the server.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(3);
 // Number of chat messages that can wait for the command handler.
@@ -398,7 +402,31 @@ impl Gateway {
         }
 
         // Move the bot into a voice channel and wait for the voice server.
+        // Discord sends nothing when a join does not change the voice state,
+        // so a bot that is still in voice from an old session leaves first,
+        // and a join without an answer is tried once more after a leave.
         pub async fn JoinVoice(
+                &self,
+                guild_id: &str,
+                channel_id: &str,
+        ) -> Result<VoiceServer> {
+                self.LeaveStaleVoice(guild_id).await;
+                let error = match self.RequestJoin(guild_id, channel_id).await {
+                        Ok(server) => return Ok(server),
+                        Err(e) => e,
+                };
+                warn!(
+                        gateway = %self._label,
+                        error = %error,
+                        "voice join failed, the bot leaves and tries again",
+                );
+                self.LeaveVoice(guild_id);
+                tokio::time::sleep(REJOIN_DELAY).await;
+                self.RequestJoin(guild_id, channel_id).await
+        }
+
+        // Send one join request and wait for the voice server.
+        async fn RequestJoin(
                 &self,
                 guild_id: &str,
                 channel_id: &str,
@@ -412,15 +440,54 @@ impl Gateway {
                                 _server: None,
                                 _sender: sender,
                         });
-                self.Send(protocol::BuildVoiceState(
-                        guild_id,
-                        Some(channel_id),
-                ))?;
+                let channel = Some(channel_id);
+                let payload = protocol::BuildVoiceState(guild_id, channel);
+                self.Send(payload)?;
                 let label = &self._label;
-                let server = tokio::time::timeout(JOIN_TIMEOUT, receiver).await;
-                let server =
-                        server.with_context(|| format!("{label}: no server"))?;
-                server.with_context(|| format!("{label} closed during a join"))
+                let waited = tokio::time::timeout(JOIN_TIMEOUT, receiver).await;
+                let Ok(result) = waited else {
+                        bail!("{label}: {}", self.DescribeJoinTimeout());
+                };
+                result.with_context(|| format!("{label} closed during a join"))
+        }
+
+        // Tell which part of a join did not arrive, and clear the request.
+        fn DescribeJoinTimeout(&self) -> &'static str {
+                let pending = self._shared._pendingJoin.lock().unwrap().take();
+                let Some(pending) = pending else { return "join cancelled" };
+                let has_session = pending._sessionId.is_some();
+                match (has_session, pending._server.is_some()) {
+                        (false, false) => {
+                                "no answer to the join, check the Connect \
+                                 permission and the user limit of the channel"
+                        }
+                        (true, false) => "joined, but got no voice server",
+                        (false, true) => "got a voice server, but no session",
+                        (true, true) => "the join finished too late",
+                }
+        }
+
+        // If the server still shows this bot in voice (for example after a
+        // crash), leave first and wait until the server confirms it.
+        async fn LeaveStaleVoice(&self, guild_id: &str) {
+                if self.getBotChannel(guild_id).is_none() { return; }
+                info!(gateway = %self._label, "bot is in voice, leaves first");
+                self.LeaveVoice(guild_id);
+                let wait = async {
+                        loop {
+                                let changed = self._shared._changed.notified();
+                                if self.getBotChannel(guild_id).is_none() {
+                                        return;
+                                }
+                                changed.await;
+                        }
+                };
+                let _ = tokio::time::timeout(STALE_LEAVE_TIMEOUT, wait).await;
+        }
+
+        fn getBotChannel(&self, guild_id: &str) -> Option<String> {
+                let state = self._shared._state.lock().unwrap();
+                state.getUserChannel(guild_id, &self._shared._botId)
         }
 
         // Take the bot out of voice in a guild.
