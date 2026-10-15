@@ -3,6 +3,8 @@ name = "voice-pipe"
 version = "0.1.0"
 edition = "2024"
 description = "Voice bridge between Discord and a self-hosted Fluxer instance."
+license = "MIT"
+authors = ["Grimsace"]
 
 [dependencies]
 anyhow = "1"

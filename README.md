@@ -374,3 +374,8 @@ Run the tests:
 ```sh
 cargo test
 ```
+
+## License
+
+voice-pipe is released under the [MIT License](LICENSE).
+Copyright (c) 2026 Grimsace.
