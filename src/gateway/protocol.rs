@@ -82,8 +82,11 @@ pub struct ChannelData {
         pub guild_id: Option<String>,
         #[serde(default)]
         pub name: Option<String>,
+        // None when an update event does not include the type.
         #[serde(rename = "type", default)]
-        pub kind: u8,
+        pub kind: Option<u8>,
+        #[serde(default)]
+        pub position: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -133,7 +136,7 @@ pub struct MessageData {
 
 impl ChannelData {
         pub fn isVoice(&self) -> bool {
-                VOICE_CHANNEL_TYPES.contains(&self.kind)
+                self.kind.is_some_and(|k| VOICE_CHANNEL_TYPES.contains(&k))
         }
 }
 

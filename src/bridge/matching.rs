@@ -99,6 +99,23 @@ fn FindNamePairs<'a>(
         pairs
 }
 
+// Return the names that two or more voice channels share. Name matching
+// uses the first of these channels in the channel list.
+pub fn FindDuplicateNames(channels: &[VoiceChannel]) -> Vec<String> {
+        let mut counts: HashMap<String, (usize, &str)> = HashMap::new();
+        for channel in channels {
+                let name = NormalizeName(channel.getName());
+                counts.entry(name).or_insert((0, channel.getName())).0 += 1;
+        }
+        let mut names: Vec<String> = counts
+                .into_values()
+                .filter(|(count, _)| *count > 1)
+                .map(|(_, name)| name.to_string())
+                .collect();
+        names.sort();
+        names
+}
+
 fn NormalizeName(name: &str) -> String { name.trim().to_lowercase() }
 
 #[cfg(test)]
@@ -106,9 +123,8 @@ mod tests {
         use super::*;
 
         fn Channels(items: &[(&str, &str)]) -> Vec<VoiceChannel> {
-                items.iter()
-                        .map(|(id, name)| VoiceChannel::New(id, name))
-                        .collect()
+                let indexed = items.iter().enumerate();
+                indexed.map(|(i, (id, name))| VoiceChannel::New(id, name, i as i64)).collect()
         }
 
         fn Link(discord: &str, fluxer: &str) -> LinkSettings {
@@ -134,6 +150,17 @@ mod tests {
                 let f = Channels(&[("a", "General"), ("b", "Lobby")]);
                 let pairs = FindPairs(&[Link("2", "a")], true, &d, &f);
                 assert_eq!(pairs, vec![ChannelPair::New(&d[1], &f[0])]);
+        }
+
+        #[test]
+        fn FirstOfTwoSameNamesWins() {
+                let d = Channels(&[("1", "General"), ("2", "general")]);
+                let f = Channels(&[("a", "General")]);
+                let pairs = FindPairs(&[], true, &d, &f);
+                assert_eq!(pairs.len(), 1);
+                assert_eq!(pairs[0].getKey(), &LinkKey::New("1", "a"));
+                assert_eq!(FindDuplicateNames(&d), ["General".to_string()]);
+                assert!(FindDuplicateNames(&f).is_empty());
         }
 
         #[test]

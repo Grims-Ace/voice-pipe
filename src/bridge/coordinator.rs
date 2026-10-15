@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
 use futures_util::future::join_all;
@@ -20,17 +20,21 @@ use super::link::{LinkHandle, LinkKey, Occupancy};
 use super::matching::{self, ChannelPair};
 use super::status;
 use crate::commands::{self, Command};
-use crate::gateway::ChatMessage;
+use crate::gateway::{ChatMessage, VoiceChannel};
 use crate::platform::Platform;
 
 // Time between checks when no gateway event comes.
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(2);
+// Time that a link must be unwanted before it stops.
+const STOP_DELAY: Duration = Duration::from_secs(5);
 
 // The owner of all link tasks.
 pub struct Coordinator {
         _hub: Arc<Hub>,
         _links: HashMap<LinkKey, LinkHandle>,
         _stopping: Vec<(LinkKey, LinkHandle)>,
+        _unwantedSince: HashMap<LinkKey, Instant>,
+        _warnedNames: HashSet<(Platform, String)>,
         _messages: mpsc::Receiver<ChatMessage>,
 }
 
@@ -44,6 +48,8 @@ impl Coordinator {
                         _hub: hub,
                         _links: HashMap::new(),
                         _stopping: Vec::new(),
+                        _unwantedSince: HashMap::new(),
+                        _warnedNames: HashSet::new(),
                         _messages: messages,
                 }
         }
@@ -86,37 +92,58 @@ impl Coordinator {
         // Start, update, and stop links to match the people in the channels.
         fn Reconcile(&mut self) {
                 self._stopping.retain(|(_, handle)| !handle.isFinished());
+                let pairs = self.FindPairs();
+                let found: HashSet<LinkKey> =
+                        pairs.iter().map(|p| p.getKey().clone()).collect();
                 let mut wanted: HashSet<LinkKey> = HashSet::new();
-                if self._hub.isEnabled() {
-                        for pair in self.FindPairs() {
-                                let occupancy =
-                                        self.FindOccupancy(pair.getKey());
-                                if occupancy.isEmpty() { continue; }
-                                wanted.insert(pair.getKey().clone());
-                                self.EnsureLink(&pair, occupancy);
+                let is_enabled = self._hub.isEnabled();
+                for pair in pairs.iter().filter(|_| is_enabled) {
+                        let occupancy = self.FindOccupancy(pair.getKey());
+                        if occupancy.isEmpty() {
+                                // Let the mirrors leave now. The link task
+                                // stops after the stop delay.
+                                self.UpdateLink(pair.getKey(), occupancy);
+                                continue;
                         }
+                        wanted.insert(pair.getKey().clone());
+                        self.EnsureLink(pair, occupancy);
                 }
-                let unwanted: Vec<LinkKey> = self
-                        ._links
-                        .keys()
-                        .filter(|k| !wanted.contains(*k))
-                        .cloned()
-                        .collect();
-                for key in unwanted { self.StopLink(key); }
+                self.StopUnwanted(&wanted, &found);
         }
 
-        fn FindPairs(&self) -> Vec<ChannelPair> {
+        // Find the channel pairs, and warn once about channel names that
+        // are used two or more times.
+        fn FindPairs(&mut self) -> Vec<ChannelPair> {
+                let discord = self.FindVoiceChannels(Platform::Discord);
+                let fluxer = self.FindVoiceChannels(Platform::Fluxer);
+                self.WarnDuplicates(Platform::Discord, &discord);
+                self.WarnDuplicates(Platform::Fluxer, &fluxer);
                 let config = self._hub.getConfig();
-                let discord = self._hub.getPlatform(Platform::Discord);
-                let fluxer = self._hub.getPlatform(Platform::Fluxer);
                 matching::FindPairs(
                         config.getLinks(),
                         config.getGeneral().isNameMatchEnabled(),
-                        &discord.getGateway()
-                                .getVoiceChannels(discord.getGuildId()),
-                        &fluxer.getGateway()
-                                .getVoiceChannels(fluxer.getGuildId()),
+                        &discord,
+                        &fluxer,
                 )
+        }
+
+        fn FindVoiceChannels(&self, platform: Platform) -> Vec<VoiceChannel> {
+                let side = self._hub.getPlatform(platform);
+                side.getGateway().getVoiceChannels(side.getGuildId())
+        }
+
+        fn WarnDuplicates(&mut self, platform: Platform, channels: &[VoiceChannel]) {
+                for name in matching::FindDuplicateNames(channels) {
+                        if !self._warnedNames.insert((platform, name.clone())) {
+                                continue;
+                        }
+                        warn!(
+                                %platform,
+                                channel = %name,
+                                "two or more voice channels have this name, \
+                                 the bridge uses the first one in the list",
+                        );
+                }
         }
 
         fn FindOccupancy(&self, key: &LinkKey) -> Occupancy {
@@ -126,6 +153,12 @@ impl Coordinator {
                         discord.getHumans(key.getChannelId(Platform::Discord)),
                         fluxer.getHumans(key.getChannelId(Platform::Fluxer)),
                 )
+        }
+
+        fn UpdateLink(&self, key: &LinkKey, occupancy: Occupancy) {
+                if let Some(handle) = self._links.get(key) {
+                        handle.UpdateOccupancy(occupancy);
+                }
         }
 
         // Update a running link, or start it. Do not start a link while its
@@ -147,8 +180,32 @@ impl Coordinator {
                 self._links.insert(pair.getKey().clone(), handle);
         }
 
-        fn StopLink(&mut self, key: LinkKey) {
+        // Stop the links that were not wanted for the full stop delay. A
+        // short gap (a reconnect, or a channel event) must not stop a link,
+        // because a restart makes all of its bots leave and join again.
+        // When the bridge is off, stop at once.
+        fn StopUnwanted(&mut self, wanted: &HashSet<LinkKey>, found: &HashSet<LinkKey>) {
+                let now = Instant::now();
+                let is_enabled = self._hub.isEnabled();
+                self._unwantedSince.retain(|key, _| !wanted.contains(key));
+                let unwanted: Vec<LinkKey> =
+                        self._links.keys().filter(|k| !wanted.contains(*k)).cloned().collect();
+                for key in unwanted {
+                        let since = *self._unwantedSince.entry(key.clone()).or_insert(now);
+                        if is_enabled && now - since < STOP_DELAY { continue; }
+                        let reason = match (is_enabled, found.contains(&key)) {
+                                (false, _) => "bridge is off",
+                                (true, false) => "a channel of the link is gone",
+                                (true, true) => "both channels are empty",
+                        };
+                        self.StopLink(key, reason);
+                }
+        }
+
+        fn StopLink(&mut self, key: LinkKey, reason: &str) {
+                self._unwantedSince.remove(&key);
                 let Some(handle) = self._links.remove(&key) else { return };
+                info!(link = %handle.getStatus().getName(), reason, "link stops");
                 handle.Stop();
                 self._stopping.push((key, handle));
         }
@@ -156,13 +213,9 @@ impl Coordinator {
         // Stop all links and wait until their bots have left.
         async fn StopAll(&mut self) {
                 let keys: Vec<LinkKey> = self._links.keys().cloned().collect();
-                for key in keys { self.StopLink(key); }
-                join_all(
-                        self._stopping
-                                .drain(..)
-                                .map(|(_, handle)| handle.Wait()),
-                )
-                .await;
+                for key in keys { self.StopLink(key, "bridge shuts down"); }
+                let handles = self._stopping.drain(..).map(|(_, h)| h.Wait());
+                join_all(handles).await;
         }
 
         // ====================================================================
