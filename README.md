@@ -76,7 +76,7 @@ server, so only one link at a time can use it for overflow.
 - Bots do not decode or subscribe to audio until people are in both
   channels. On Discord the voice driver does not decrypt or decode. On
   Fluxer the bot does not subscribe to any audio track.
-- Frames with a level below `voice_threshold` are silence and are not sent.
+- Audio Inputs with a level below `voice_threshold` are silence and are not sent.
 - A mirror sends audio only while its person speaks, plus a short
   `silence_hangover_ms`, so that the ends of words are not cut. Then the
   Discord track pauses and the Fluxer track goes idle (Opus DTX).
@@ -85,8 +85,7 @@ server, so only one link at a time can use it for overflow.
 
 ### Fluxer traffic stays local
 
-Fluxer runs on the same machine as the bridge, so the bridge does not go
-through Cloudflare or nginx for Fluxer:
+Fluxer runs on the same machine as the bridge:
 
 | Traffic | Default address |
 | :--- | :--- |
@@ -375,9 +374,3 @@ Run the tests:
 ```sh
 cargo test
 ```
-
-The code follows *Grim's Style Guide*: 8-space indentation, lines of 80
-characters or less, PascalCase functions, and `_camelCase` private fields.
-Rust warns about these names, so `main.rs` turns off the `non_snake_case`
-warning. Do not run `cargo fmt` without changes to its settings, because
-stable rustfmt puts short accessors and guard clauses on many lines.
