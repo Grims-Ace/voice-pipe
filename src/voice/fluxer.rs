@@ -75,23 +75,21 @@ impl FluxerVoice {
                 server: &VoiceServer,
                 target: &VoiceTarget,
         ) -> Result<Self> {
-                let url = target
-                        ._livekitUrl
-                        .as_deref()
-                        .unwrap_or(server.getEndpoint());
+                let url =
+                        target.getLivekitUrl().unwrap_or(server.getEndpoint());
                 // The bridge subscribes only while it listens.
                 let mut options = RoomOptions::default();
                 options.auto_subscribe = false;
                 let (room, events) =
                         Room::connect(url, server.getToken(), options).await?;
                 let room = Arc::new(room);
-                info!(url, bot = %target._botId, "joined Fluxer voice");
+                info!(url, bot = %target.getBotId(), "joined Fluxer voice");
                 let source = PublishTrack(&room).await?;
                 let (output_tx, output_rx) = mpsc::channel(SEND_QUEUE);
                 tokio::spawn(RunPublisher(
                         source,
                         output_rx,
-                        target._tuning.getHangover(),
+                        target.getTuning().getHangover(),
                 ));
                 let receive = Arc::new(ReceiveState::New(target));
                 let is_connected = Arc::new(AtomicBool::new(true));
@@ -129,8 +127,8 @@ impl FluxerVoice {
                 }
         }
 
-        // Leave the room. Without this, the bot can stay in the channel as a
-        // ghost until LiveKit times out.
+        // Leave the room. Without this, the bot stays in the channel list
+        // until LiveKit times out.
         pub async fn Close(self) {
                 if let Err(e) = self._room.close().await {
                         warn!(error = %e, "cannot close LiveKit room");
@@ -155,9 +153,9 @@ impl ReceiveState {
         fn New(target: &VoiceTarget) -> Self {
                 Self {
                         _isListening: AtomicBool::new(false),
-                        _ownBotIds: target._ownBotIds.clone(),
-                        _heard: target._heard.clone(),
-                        _voiceThreshold: target._tuning.getVoiceThreshold(),
+                        _ownBotIds: target.getOwnBotIds(),
+                        _heard: target.getHeard(),
+                        _voiceThreshold: target.getTuning().getVoiceThreshold(),
                 }
         }
 

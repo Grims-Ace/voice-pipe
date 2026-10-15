@@ -28,7 +28,8 @@ pub fn ParseCommand(prefix: &str, content: &str) -> Option<Command> {
         Some(command)
 }
 
-pub fn BuildHelp(prefix: &str) -> String {
+// Write the list of commands for the help command.
+pub fn FormatHelp(prefix: &str) -> String {
         format!(
                 "**voice-pipe commands**\n\
                  `{prefix}help` · Show this list.\n\
@@ -39,7 +40,8 @@ pub fn BuildHelp(prefix: &str) -> String {
         )
 }
 
-pub fn BuildUnknownReply(prefix: &str, name: &str) -> String {
+// Write the reply for a command that does not exist.
+pub fn FormatUnknownReply(prefix: &str, name: &str) -> String {
         format!("Unknown command `{name}`. Send `{prefix}help` for a list.")
 }
 

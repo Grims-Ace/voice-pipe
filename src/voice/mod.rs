@@ -71,6 +71,20 @@ impl AudioTuning {
 }
 
 impl VoiceTarget {
+        pub fn getGuildId(&self) -> &str { &self._guildId }
+        pub fn getChannelId(&self) -> &str { &self._channelId }
+        pub fn getBotId(&self) -> &str { &self._botId }
+        pub fn getTuning(&self) -> AudioTuning { self._tuning }
+        pub fn getLivekitUrl(&self) -> Option<&str> {
+                self._livekitUrl.as_deref()
+        }
+        pub fn getOwnBotIds(&self) -> Arc<HashSet<String>> {
+                self._ownBotIds.clone()
+        }
+        pub fn getHeard(&self) -> mpsc::Sender<SpeakerFrame> {
+                self._heard.clone()
+        }
+
         // `own_bot_ids` are the IDs of all bridge bots on this platform. The
         // receiver ignores their audio, because they only replay audio from
         // the other platform. `heard` gets the audio of the other speakers.

@@ -65,7 +65,8 @@ proxy_tokens = [
         # "proxy-token-2",
 ]
 
-# Role IDs that can use the toggle command. Empty = everyone can use it.
+# Role IDs that can use the toggle command. Empty = everyone can use it,
+# so any member can turn the bridge off. Set at least one role.
 command_role_ids = []
 
 # Discord URLs. You do not need to change these.

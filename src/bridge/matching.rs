@@ -123,8 +123,12 @@ mod tests {
         use super::*;
 
         fn Channels(items: &[(&str, &str)]) -> Vec<VoiceChannel> {
-                let indexed = items.iter().enumerate();
-                indexed.map(|(i, (id, name))| VoiceChannel::New(id, name, i as i64)).collect()
+                items.iter()
+                        .enumerate()
+                        .map(|(i, (id, name))| {
+                                VoiceChannel::New(id, name, i as i64)
+                        })
+                        .collect()
         }
 
         fn Link(discord: &str, fluxer: &str) -> LinkSettings {

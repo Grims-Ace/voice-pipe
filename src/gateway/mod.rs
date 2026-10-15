@@ -246,12 +246,17 @@ impl GatewayShared {
                                 self.ApplyChannel(data, false)
                         }
                         "CHANNEL_DELETE" => self.ApplyChannel(data, true),
-                        "MESSAGE_CREATE" => QueueMessage(data, messages),
+                        // Messages go through their own queue and do not
+                        // change the voice view, so they wake no waiter.
+                        "MESSAGE_CREATE" => {
+                                return QueueMessage(data, messages);
+                        }
                         _ => return,
                 }
                 self._changed.notify_waiters();
         }
 
+        // Replace the view of a guild with its full snapshot.
         fn ApplyGuildCreate(&self, data: &Value) {
                 let Some(guild) = ParseData::<GuildCreate>(data) else {
                         return;
@@ -260,6 +265,7 @@ impl GatewayShared {
                 self._state.lock().unwrap().ApplyGuildCreate(&guild);
         }
 
+        // Move a user in the view, and complete a join of this bot.
         fn ApplyVoiceState(&self, data: &Value) {
                 let Some(voice) = ParseData::<VoiceStateData>(data) else {
                         return;
@@ -270,6 +276,7 @@ impl GatewayShared {
                 self._state.lock().unwrap().ApplyVoiceState(&voice);
         }
 
+        // Give the voice server to the join that waits for this guild.
         fn ApplyVoiceServer(&self, data: &Value) {
                 let Some(server) = ParseData::<VoiceServerData>(data) else {
                         return;
@@ -288,6 +295,7 @@ impl GatewayShared {
                 FinishIfComplete(&mut slot);
         }
 
+        // Add, change, or remove a voice channel in the view.
         fn ApplyChannel(&self, data: &Value, is_delete: bool) {
                 let Some(channel) = ParseData::<ChannelData>(data) else {
                         return;

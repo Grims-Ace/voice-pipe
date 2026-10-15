@@ -27,6 +27,9 @@ use crate::platform::Platform;
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(2);
 // Time that a link must be unwanted before it stops.
 const STOP_DELAY: Duration = Duration::from_secs(5);
+// Time that a user must wait between two commands, so that command spam
+// cannot push the main bot into API rate limits.
+const COMMAND_COOLDOWN: Duration = Duration::from_secs(3);
 
 // The owner of all link tasks.
 pub struct Coordinator {
@@ -35,6 +38,7 @@ pub struct Coordinator {
         _stopping: Vec<(LinkKey, LinkHandle)>,
         _unwantedSince: HashMap<LinkKey, Instant>,
         _warnedNames: HashSet<(Platform, String)>,
+        _lastCommands: HashMap<String, Instant>,
         _messages: mpsc::Receiver<ChatMessage>,
 }
 
@@ -50,6 +54,7 @@ impl Coordinator {
                         _stopping: Vec::new(),
                         _unwantedSince: HashMap::new(),
                         _warnedNames: HashSet::new(),
+                        _lastCommands: HashMap::new(),
                         _messages: messages,
                 }
         }
@@ -132,7 +137,11 @@ impl Coordinator {
                 side.getGateway().getVoiceChannels(side.getGuildId())
         }
 
-        fn WarnDuplicates(&mut self, platform: Platform, channels: &[VoiceChannel]) {
+        fn WarnDuplicates(
+                &mut self,
+                platform: Platform,
+                channels: &[VoiceChannel],
+        ) {
                 for name in matching::FindDuplicateNames(channels) {
                         if !self._warnedNames.insert((platform, name.clone())) {
                                 continue;
@@ -184,18 +193,31 @@ impl Coordinator {
         // short gap (a reconnect, or a channel event) must not stop a link,
         // because a restart makes all of its bots leave and join again.
         // When the bridge is off, stop at once.
-        fn StopUnwanted(&mut self, wanted: &HashSet<LinkKey>, found: &HashSet<LinkKey>) {
+        fn StopUnwanted(
+                &mut self,
+                wanted: &HashSet<LinkKey>,
+                found: &HashSet<LinkKey>,
+        ) {
                 let now = Instant::now();
                 let is_enabled = self._hub.isEnabled();
                 self._unwantedSince.retain(|key, _| !wanted.contains(key));
-                let unwanted: Vec<LinkKey> =
-                        self._links.keys().filter(|k| !wanted.contains(*k)).cloned().collect();
+                let unwanted: Vec<LinkKey> = self
+                        ._links
+                        .keys()
+                        .filter(|k| !wanted.contains(*k))
+                        .cloned()
+                        .collect();
                 for key in unwanted {
-                        let since = *self._unwantedSince.entry(key.clone()).or_insert(now);
+                        let since = *self
+                                ._unwantedSince
+                                .entry(key.clone())
+                                .or_insert(now);
                         if is_enabled && now - since < STOP_DELAY { continue; }
                         let reason = match (is_enabled, found.contains(&key)) {
                                 (false, _) => "bridge is off",
-                                (true, false) => "a channel of the link is gone",
+                                (true, false) => {
+                                        "a channel of the link is gone"
+                                }
                                 (true, true) => "both channels are empty",
                         };
                         self.StopLink(key, reason);
@@ -205,7 +227,8 @@ impl Coordinator {
         fn StopLink(&mut self, key: LinkKey, reason: &str) {
                 self._unwantedSince.remove(&key);
                 let Some(handle) = self._links.remove(&key) else { return };
-                info!(link = %handle.getStatus().getName(), reason, "link stops");
+                let name = handle.getStatus().getName().to_string();
+                info!(link = %name, reason, "link stops");
                 handle.Stop();
                 self._stopping.push((key, handle));
         }
@@ -241,20 +264,32 @@ impl Coordinator {
                 else {
                         return;
                 };
+                if !self.TryStartCommand(message.getAuthorId()) { return; }
                 info!(
                         user = %message.getAuthorId(),
                         ?command,
                         "command received",
                 );
                 let reply = match command {
-                        Command::Help => commands::BuildHelp(&prefix),
+                        Command::Help => commands::FormatHelp(&prefix),
                         Command::Toggle => self.Toggle(&message),
-                        Command::Status => self.BuildStatus(),
+                        Command::Status => self.FormatStatus(),
                         Command::Unknown(name) => {
-                                commands::BuildUnknownReply(&prefix, &name)
+                                commands::FormatUnknownReply(&prefix, &name)
                         }
                 };
                 self.SendReply(&message, reply);
+        }
+
+        // Record a command of a user. Return false while the user is in the
+        // cooldown, so that the command is ignored.
+        fn TryStartCommand(&mut self, user: &str) -> bool {
+                let now = Instant::now();
+                self._lastCommands
+                        .retain(|_, at| now - *at < COMMAND_COOLDOWN);
+                if self._lastCommands.contains_key(user) { return false; }
+                self._lastCommands.insert(user.to_string(), now);
+                true
         }
 
         // Turn the bridge off or on. The next Reconcile stops or starts the
@@ -286,7 +321,8 @@ impl Coordinator {
                                 .any(|r| allowed.contains(r))
         }
 
-        fn BuildStatus(&self) -> String {
+        // Write the status report, with the links in name order.
+        fn FormatStatus(&self) -> String {
                 let mut links: Vec<_> =
                         self._links.values().map(|h| h.getStatus()).collect();
                 links.sort_by(|a, b| a.getName().cmp(b.getName()));

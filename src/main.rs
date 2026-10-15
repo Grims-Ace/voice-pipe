@@ -54,7 +54,7 @@ fn main() -> Result<()> {
 
 // Load the config, start logging, and run the bridge until shutdown.
 fn Run() -> Result<()> {
-        let path = FindConfigPath();
+        let path = FindConfigPath()?;
         let config = Config::Load(&path)?;
         StartLogging(config.getGeneral().getLogLevel());
         info!(path = %path.display(), "config loaded");
@@ -70,14 +70,21 @@ fn Run() -> Result<()> {
 }
 
 // Use the first argument as the config path, or config.toml.
-fn FindConfigPath() -> PathBuf {
+fn FindConfigPath() -> Result<PathBuf> {
         let args: Vec<String> = std::env::args().skip(1).collect();
-        let path = match args.as_slice() {
-                [flag, path, ..] if flag == "--config" => path.clone(),
-                [path, ..] => path.clone(),
-                [] => DEFAULT_CONFIG_PATH.to_string(),
+        ParseConfigPath(&args)
+}
+
+fn ParseConfigPath(args: &[String]) -> Result<PathBuf> {
+        let path = match args {
+                [flag, path, ..] if flag == "--config" => path.as_str(),
+                [flag] if flag == "--config" => {
+                        return Err(anyhow!("--config needs a path"));
+                }
+                [path, ..] => path.as_str(),
+                [] => DEFAULT_CONFIG_PATH,
         };
-        PathBuf::from(path)
+        Ok(PathBuf::from(path))
 }
 
 // Use RUST_LOG if it is set, else the level from the config. Songbird logs
@@ -132,4 +139,28 @@ async fn WaitForStopSignal() {
 #[cfg(not(unix))]
 async fn WaitForStopSignal() {
         let _ = tokio::signal::ctrl_c().await;
+}
+
+#[cfg(test)]
+mod tests {
+        use super::*;
+
+        fn Args(items: &[&str]) -> Vec<String> {
+                items.iter().map(|s| s.to_string()).collect()
+        }
+
+        #[test]
+        fn ConfigPathComesFromArguments() {
+                let path = ParseConfigPath(&Args(&["--config", "a.toml"]));
+                assert_eq!(path.unwrap(), PathBuf::from("a.toml"));
+                let path = ParseConfigPath(&Args(&["b.toml"]));
+                assert_eq!(path.unwrap(), PathBuf::from("b.toml"));
+                let path = ParseConfigPath(&[]);
+                assert_eq!(path.unwrap(), PathBuf::from(DEFAULT_CONFIG_PATH));
+        }
+
+        #[test]
+        fn ConfigFlagNeedsAPath() {
+                assert!(ParseConfigPath(&Args(&["--config"])).is_err());
+        }
 }

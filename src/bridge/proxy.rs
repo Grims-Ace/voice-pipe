@@ -26,7 +26,7 @@ const PROXY_INTENTS: u64 = INTENT_GUILDS | INTENT_GUILD_VOICE_STATES;
 // Time limit for a proxy to log in and join voice.
 const OPEN_TIMEOUT: Duration = Duration::from_secs(30);
 // Time that a proxy waits after a failure before the pool gives it out again.
-const REST_TIME: Duration = Duration::from_secs(60);
+const HOLD_TIME: Duration = Duration::from_secs(60);
 
 // ============================================================================
 // Types
@@ -45,7 +45,7 @@ pub struct ProxyAccount {
 // The proxy accounts of one platform that are not in use.
 pub struct ProxyPool {
         _free: VecDeque<ProxyAccount>,
-        _resting: Vec<(Instant, ProxyAccount)>,
+        _held: Vec<(Instant, ProxyAccount)>,
         _total: usize,
 }
 
@@ -105,41 +105,40 @@ impl ProxyAccount {
 
 impl ProxyPool {
         pub fn getTotal(&self) -> usize { self._total }
-        pub fn getFreeCount(&self) -> usize {
-                self._free.len() + self._resting.len()
-        }
+        pub fn getFreeCount(&self) -> usize { self._free.len() }
+        pub fn getHeldCount(&self) -> usize { self._held.len() }
 
         pub fn New(accounts: Vec<ProxyAccount>) -> Self {
                 Self {
                         _total: accounts.len(),
                         _free: accounts.into(),
-                        _resting: Vec::new(),
+                        _held: Vec::new(),
                 }
         }
 
         // Give out a free account, or None when all accounts are in use.
         pub fn Acquire(&mut self) -> Option<ProxyAccount> {
-                self.WakeRested();
+                self.ReleaseHeld();
                 self._free.pop_front()
         }
 
-        pub fn Return(&mut self, account: ProxyAccount) {
+        pub fn Release(&mut self, account: ProxyAccount) {
                 self._free.push_back(account);
         }
 
         // Hold back an account that failed, so that a bad account does not
         // fail again and again.
-        pub fn Rest(&mut self, account: ProxyAccount) {
-                self._resting.push((Instant::now() + REST_TIME, account));
+        pub fn Hold(&mut self, account: ProxyAccount) {
+                self._held.push((Instant::now() + HOLD_TIME, account));
         }
 
-        fn WakeRested(&mut self) {
+        fn ReleaseHeld(&mut self) {
                 let now = Instant::now();
                 let (ready, waiting): (Vec<_>, Vec<_>) =
-                        std::mem::take(&mut self._resting)
+                        std::mem::take(&mut self._held)
                                 .into_iter()
                                 .partition(|(at, _)| *at <= now);
-                self._resting = waiting;
+                self._held = waiting;
                 self._free
                         .extend(ready.into_iter().map(|(_, account)| account));
         }
@@ -164,7 +163,7 @@ impl ProxySession {
                 user_id: &str,
         ) -> Result<ProxySession, ProxyAccount> {
                 let nickname =
-                        Dress(hub, &mut account, platform, user_id).await;
+                        CopyProfile(hub, &mut account, platform, user_id).await;
                 let side = hub.getPlatform(platform);
                 let label = format!("{platform} proxy {}", account._botId);
                 let gateway = Gateway::Connect(side.BuildGatewaySettings(
@@ -238,7 +237,7 @@ async fn Fail(
 // Copy the name and avatar of a user from the other platform to the proxy.
 // Return the nickname. Errors only cause warnings, because a proxy with the
 // wrong name still relays audio.
-async fn Dress(
+async fn CopyProfile(
         hub: &Hub,
         account: &mut ProxyAccount,
         platform: Platform,
@@ -278,28 +277,28 @@ async fn Dress(
                         "cannot set proxy nickname",
                 );
         }
-        if account._avatarUserId.as_deref() != Some(user_id) {
-                CopyAvatar(
-                        source.getRest(),
-                        &account._rest,
-                        guild_id,
-                        profile.as_ref(),
-                )
-                .await;
+        // Without a profile the avatar is not known, so keep the old one
+        // and try again on the next open.
+        let Some(profile) = profile else { return nickname };
+        if account._avatarUserId.as_deref() == Some(user_id) {
+                return nickname;
+        }
+        let source = source.getRest();
+        if CopyAvatar(source, &account._rest, guild_id, &profile).await {
                 account._avatarUserId = Some(user_id.to_string());
         }
         nickname
 }
 
 // Set the guild avatar of the proxy to the avatar of the user, or remove it
-// if the user has no avatar.
+// if the user has no avatar. Return true on success.
 async fn CopyAvatar(
         source: &RestClient,
         proxy: &RestClient,
         guild_id: &str,
-        profile: Option<&UserProfile>,
-) {
-        let image = match profile.and_then(|p| p.getAvatarUrl()) {
+        profile: &UserProfile,
+) -> bool {
+        let image = match profile.getAvatarUrl() {
                 Some(url) => match source.FetchImage(url).await {
                         Ok(image) => Some(image),
                         Err(e) => {
@@ -308,16 +307,18 @@ async fn CopyAvatar(
                                         error = %e,
                                         "cannot download avatar",
                                 );
-                                return;
+                                return false;
                         }
                 },
                 None => None,
         };
-        if let Err(e) = proxy.SetAvatar(guild_id, image.as_deref()).await {
-                warn!(
-                        platform = %proxy.getPlatform(),
-                        error = %e,
-                        "cannot set proxy avatar",
-                );
-        }
+        let Err(e) = proxy.SetAvatar(guild_id, image.as_deref()).await else {
+                return true;
+        };
+        warn!(
+                platform = %proxy.getPlatform(),
+                error = %e,
+                "cannot set proxy avatar",
+        );
+        false
 }

@@ -52,7 +52,8 @@ pub struct DiscordVoice {
         _isConnected: Arc<AtomicBool>,
 }
 
-// Records which user each audio stream (SSRC) belongs to.
+// Records which user each audio stream (SSRC) belongs to, and forgets the
+// streams of users that leave.
 struct SsrcTracker {
         _ssrcUsers: Arc<Mutex<HashMap<u32, String>>>,
 }
@@ -76,6 +77,7 @@ struct ConnectionMonitor {
 struct PcmSource {
         _frames: flume::Receiver<AudioFrame>,
         _bytes: Vec<u8>,
+        _readOffset: usize,
         _isPlaying: bool,
 }
 
@@ -104,11 +106,11 @@ impl DiscordVoice {
                 })?;
                 let output = StartPlayback(
                         &mut driver,
-                        target._tuning.getHangover(),
+                        target.getTuning().getHangover(),
                 );
                 info!(
-                        channel = %target._channelId,
-                        bot = %target._botId,
+                        channel = %target.getChannelId(),
+                        bot = %target.getBotId(),
                         "joined Discord voice",
                 );
                 Ok(Self {
@@ -140,14 +142,18 @@ impl DiscordVoice {
 #[async_trait]
 impl EventHandler for SsrcTracker {
         async fn act(&self, ctx: &EventContext<'_>) -> Option<Event> {
-                let EventContext::SpeakingStateUpdate(speaking) = ctx else {
-                        return None;
-                };
-                let user = speaking.user_id?;
-                self._ssrcUsers
-                        .lock()
-                        .unwrap()
-                        .insert(speaking.ssrc, user.0.to_string());
+                let mut users = self._ssrcUsers.lock().unwrap();
+                match ctx {
+                        EventContext::SpeakingStateUpdate(speaking) => {
+                                let user = speaking.user_id?;
+                                users.insert(speaking.ssrc, user.0.to_string());
+                        }
+                        EventContext::ClientDisconnect(left) => {
+                                let user = left.user_id.0.to_string();
+                                users.retain(|_, u| *u != user);
+                        }
+                        _ => {}
+                }
                 None
         }
 }
@@ -209,12 +215,18 @@ impl EventHandler for ConnectionMonitor {
 
 impl PcmSource {
         fn New(frames: flume::Receiver<AudioFrame>) -> Self {
-                Self { _frames: frames, _bytes: Vec::new(), _isPlaying: false }
+                Self {
+                        _frames: frames,
+                        _bytes: Vec::with_capacity(FRAME_LEN * 4),
+                        _readOffset: 0,
+                        _isPlaying: false,
+                }
         }
 
         // Load the next frame into the byte buffer. Return false when the
         // sender is gone, which ends the stream.
         fn Refill(&mut self) -> bool {
+                self._readOffset = 0;
                 while self._frames.len() > PLAYBACK_MAX_DEPTH {
                         let _ = self._frames.try_recv();
                 }
@@ -234,19 +246,30 @@ impl PcmSource {
                                 self.LoadSilence();
                                 true
                         }
-                        Err(flume::TryRecvError::Disconnected) => false,
+                        Err(flume::TryRecvError::Disconnected) => {
+                                self._bytes.clear();
+                                false
+                        }
                 }
         }
 
-        fn LoadSilence(&mut self) { self._bytes = vec![0u8; FRAME_LEN * 4]; }
+        fn LoadSilence(&mut self) {
+                self._bytes.clear();
+                self._bytes.resize(FRAME_LEN * 4, 0);
+        }
+
+        fn hasUnreadBytes(&self) -> bool {
+                self._readOffset < self._bytes.len()
+        }
 }
 
 impl Read for PcmSource {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-                if self._bytes.is_empty() && !self.Refill() { return Ok(0); }
-                let len = buf.len().min(self._bytes.len());
-                buf[..len].copy_from_slice(&self._bytes[..len]);
-                self._bytes.drain(..len);
+                if !self.hasUnreadBytes() && !self.Refill() { return Ok(0); }
+                let unread = &self._bytes[self._readOffset..];
+                let len = buf.len().min(unread.len());
+                buf[..len].copy_from_slice(&unread[..len]);
+                self._readOffset += len;
                 Ok(len)
         }
 }
@@ -280,12 +303,12 @@ fn BuildConnectionInfo(
                 .getSessionId()
                 .context("Discord sent no voice session ID")?;
         Ok(ConnectionInfo {
-                channel_id: ChannelId(ParseId(&target._channelId)?),
+                channel_id: ChannelId(ParseId(target.getChannelId())?),
                 endpoint: server.getEndpoint().to_string(),
-                guild_id: GuildId(ParseId(&target._guildId)?),
+                guild_id: GuildId(ParseId(target.getGuildId())?),
                 session_id: session_id.to_string(),
                 token: server.getToken().to_string(),
-                user_id: UserId(ParseId(&target._botId)?),
+                user_id: UserId(ParseId(target.getBotId())?),
         })
 }
 
@@ -302,17 +325,18 @@ fn AddReceiveEvents(
         is_listening: Arc<AtomicBool>,
 ) {
         let ssrc_users = Arc::new(Mutex::new(HashMap::new()));
-        let tracker = SsrcTracker { _ssrcUsers: ssrc_users.clone() };
-        driver.add_global_event(
-                Event::Core(CoreEvent::SpeakingStateUpdate),
-                tracker,
-        );
+        let events =
+                [CoreEvent::SpeakingStateUpdate, CoreEvent::ClientDisconnect];
+        for event in events {
+                let tracker = SsrcTracker { _ssrcUsers: ssrc_users.clone() };
+                driver.add_global_event(Event::Core(event), tracker);
+        }
         let receiver = VoiceReceiver {
                 _ssrcUsers: ssrc_users,
-                _ownBotIds: target._ownBotIds.clone(),
+                _ownBotIds: target.getOwnBotIds(),
                 _isListening: is_listening,
-                _heard: target._heard.clone(),
-                _voiceThreshold: target._tuning.getVoiceThreshold(),
+                _heard: target.getHeard(),
+                _voiceThreshold: target.getTuning().getVoiceThreshold(),
         };
         driver.add_global_event(Event::Core(CoreEvent::VoiceTick), receiver);
 }
@@ -384,5 +408,33 @@ async fn ForwardUntilQuiet(
                         Ok(None) => return false,
                         Err(_) => return true,
                 }
+        }
+}
+
+#[cfg(test)]
+mod tests {
+        use super::*;
+
+        fn ReadAll(source: &mut PcmSource, size: usize) -> Vec<u8> {
+                let mut out = Vec::new();
+                let mut buf = vec![0u8; size];
+                loop {
+                        let len = source.read(&mut buf).unwrap();
+                        if len == 0 { return out; }
+                        out.extend_from_slice(&buf[..len]);
+                }
+        }
+
+        #[test]
+        fn SourcePlaysFramesThenEnds() {
+                let (tx, rx) = flume::bounded(PLAYBACK_MAX_DEPTH);
+                let tone = AudioFrame::FromStereo(&[16384; FRAME_LEN]);
+                for _ in 0..PLAYBACK_PREBUFFER { tx.send(tone.clone()).ok(); }
+                drop(tx);
+                let mut source = PcmSource::New(rx);
+                let bytes = ReadAll(&mut source, 1000);
+                assert_eq!(bytes.len(), PLAYBACK_PREBUFFER * FRAME_LEN * 4);
+                assert_eq!(&bytes[..4], &0.5f32.to_le_bytes());
+                assert_eq!(ReadAll(&mut source, 1000).len(), 0);
         }
 }

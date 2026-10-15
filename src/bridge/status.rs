@@ -195,7 +195,11 @@ fn FormatPlatform(
         links: &[LinkStatus],
 ) -> String {
         let side = hub.getPlatform(platform);
-        let (free, total) = side.getProxyCounts();
+        let (free, held, total) = side.getProxyCounts();
+        let held = match held {
+                0 => String::new(),
+                n => format!(" ({n} wait after a failure)"),
+        };
         let main = match side.getMainLink() {
                 Some(key) => {
                         let name = links
@@ -207,7 +211,8 @@ fn FormatPlatform(
                 None => "not in voice".to_string(),
         };
         format!(
-                "{} proxies free: {free} of {total} · main bot: {main}",
+                "{} proxies free: {free} of {total}{held} · main bot: \
+                 {main}",
                 platform.getTitle()
         )
 }

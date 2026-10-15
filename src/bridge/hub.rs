@@ -77,10 +77,10 @@ impl PlatformHub {
                 self._mainLink.lock().unwrap().clone()
         }
 
-        // Return (free, total) proxy counts.
-        pub fn getProxyCounts(&self) -> (usize, usize) {
+        // Return (free, held, total) proxy counts.
+        pub fn getProxyCounts(&self) -> (usize, usize, usize) {
                 let pool = self._proxies.lock().unwrap();
-                (pool.getFreeCount(), pool.getTotal())
+                (pool.getFreeCount(), pool.getHeldCount(), pool.getTotal())
         }
 
         // Return the people in a voice channel, without the bridge bots.
@@ -112,7 +112,7 @@ impl PlatformHub {
                 let tokens = settings.getProxyTokens();
                 let general = config.getGeneral();
                 let proxies =
-                        FindProxies(&rest, tokens, &main_id, general).await;
+                        FetchProxies(&rest, tokens, &main_id, general).await;
                 let guild_id = settings.getGuildId();
                 join_all(proxies.iter().map(|p| p.SetIdleName(guild_id))).await;
                 let mut bot_ids: HashSet<String> = proxies
@@ -182,11 +182,11 @@ impl PlatformHub {
         pub fn AcquireProxy(&self) -> Option<ProxyAccount> {
                 self._proxies.lock().unwrap().Acquire()
         }
-        pub fn ReturnProxy(&self, account: ProxyAccount) {
-                self._proxies.lock().unwrap().Return(account)
+        pub fn ReleaseProxy(&self, account: ProxyAccount) {
+                self._proxies.lock().unwrap().Release(account)
         }
-        pub fn RestProxy(&self, account: ProxyAccount) {
-                self._proxies.lock().unwrap().Rest(account)
+        pub fn HoldProxy(&self, account: ProxyAccount) {
+                self._proxies.lock().unwrap().Hold(account)
         }
 }
 
@@ -268,7 +268,7 @@ fn BuildMainGatewaySettings(
 }
 
 // Find the bot ID of each proxy token. Skip tokens that do not work.
-async fn FindProxies(
+async fn FetchProxies(
         rest: &RestClient,
         tokens: &[String],
         main_id: &str,

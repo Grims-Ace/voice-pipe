@@ -15,7 +15,7 @@ mod side;
 mod status;
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use tokio::sync::watch;
@@ -26,13 +26,19 @@ use coordinator::Coordinator;
 use hub::Hub;
 
 const MAX_RESTART_DELAY: Duration = Duration::from_secs(120);
+// A run that lasts this long counts as healthy, so the restart delay starts
+// again from the shortest value.
+const HEALTHY_RUN_TIME: Duration = Duration::from_secs(300);
 
 // Run the bridge until `stop` becomes true. Start again after an error.
 pub async fn Supervise(config: Config, mut stop: watch::Receiver<bool>) {
         let config = Arc::new(config);
         let mut failures: u32 = 0;
         loop {
-                match RunOnce(config.clone(), stop.clone()).await {
+                let started = Instant::now();
+                let result = RunOnce(config.clone(), stop.clone()).await;
+                if started.elapsed() >= HEALTHY_RUN_TIME { failures = 0; }
+                match result {
                         Ok(()) => return,
                         Err(e) => {
                                 error!(

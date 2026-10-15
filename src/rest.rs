@@ -28,6 +28,10 @@ pub const MESSAGE_MAX: usize = 2000;
 // Longest rate limit wait that the client accepts before it gives up.
 const RATE_LIMIT_MAX_WAIT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+// Largest avatar image that the client downloads. Avatars are much smaller,
+// so a larger body is an error.
+const AVATAR_MAX_BYTES: usize = 8 * 1024 * 1024;
+const AVATAR_DEFAULT_TYPE: &str = "image/png";
 
 // ============================================================================
 // Types
@@ -108,29 +112,26 @@ impl RestClient {
                 user_id: &str,
         ) -> Result<UserProfile> {
                 let path = format!("/guilds/{guild_id}/members/{user_id}");
-                match self.Send(Method::GET, &path, None).await {
-                        Ok(member) => Ok(
-                                self.BuildProfile(guild_id, user_id, &member)
-                        ),
+                let member = match self.Send(Method::GET, &path, None).await {
+                        Ok(member) => member,
                         Err(e) => {
                                 warn!(
                                         platform = %self._platform,
                                         error = %e,
                                         "member read failed",
                                 );
-                                let user = self
-                                        .Send(
-                                                Method::GET,
-                                                &format!("/users/{user_id}"),
-                                                None,
-                                        )
-                                        .await?;
-                                let member = json!({ "user": user });
-                                Ok(self.BuildProfile(
-                                        guild_id, user_id, &member,
-                                ))
+                                self.FetchUserAsMember(user_id).await?
                         }
-                }
+                };
+                Ok(self.BuildProfile(guild_id, user_id, &member))
+        }
+
+        // Read the user object and put it in a member object that has no
+        // guild values.
+        async fn FetchUserAsMember(&self, user_id: &str) -> Result<Value> {
+                let path = format!("/users/{user_id}");
+                let user = self.Send(Method::GET, &path, None).await?;
+                Ok(json!({ "user": user }))
         }
 
         // Set the nickname of this bot in a guild. None removes the nickname.
@@ -179,16 +180,17 @@ impl RestClient {
         pub async fn FetchImage(&self, url: &str) -> Result<String> {
                 let response = self
                         .AddHost(self._http.get(url))
+                        .timeout(REQUEST_TIMEOUT)
                         .send()
                         .await?
                         .error_for_status()?;
-                let kind = response
-                        .headers()
-                        .get(CONTENT_TYPE)
-                        .and_then(|v| v.to_str().ok())
-                        .unwrap_or("image/png")
-                        .to_string();
+                let size = response.content_length().unwrap_or(0) as usize;
+                if size > AVATAR_MAX_BYTES { bail!("image is too large"); }
+                let kind = FindImageType(&response);
                 let bytes = response.bytes().await?;
+                if bytes.len() > AVATAR_MAX_BYTES {
+                        bail!("image is too large");
+                }
                 let encoded = base64::engine::general_purpose::STANDARD
                         .encode(&bytes);
                 Ok(format!("data:{kind};base64,{encoded}"))
@@ -255,6 +257,7 @@ impl RestClient {
                 bail!("{method} {path} is rate limited")
         }
 
+        // Make an API request with the bot token and the optional JSON body.
         fn BuildRequest(
                 &self,
                 method: Method,
@@ -337,6 +340,27 @@ async fn WaitForRateLimit(body: &Value, path: &str) -> Result<()> {
         Ok(())
 }
 
+// Return the image type from the response. Use PNG for a type that is not
+// an image, so that the data URI always contains an image type.
+fn FindImageType(response: &reqwest::Response) -> String {
+        response.headers()
+                .get(CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .map(|v| v.split(';').next().unwrap_or_default().trim())
+                .filter(|v| IsImageType(v))
+                .unwrap_or(AVATAR_DEFAULT_TYPE)
+                .to_string()
+}
+
+fn IsImageType(kind: &str) -> bool {
+        kind.strip_prefix("image/").is_some_and(|sub| {
+                !sub.is_empty()
+                        && sub.chars().all(|c| {
+                                c.is_ascii_alphanumeric() || "+-.".contains(c)
+                        })
+        })
+}
+
 // Put the IDs and avatar hash into an avatar URL template.
 fn FillTemplate(
         template: &str,
@@ -367,6 +391,15 @@ mod tests {
                         "h",
                 );
                 assert_eq!(url, "x/g/u/h.png");
+        }
+
+        #[test]
+        fn OnlyImageTypesAreAccepted() {
+                assert!(IsImageType("image/png"));
+                assert!(IsImageType("image/svg+xml"));
+                assert!(!IsImageType("text/html"));
+                assert!(!IsImageType("image/"));
+                assert!(!IsImageType("image/png,base64"));
         }
 
         #[test]

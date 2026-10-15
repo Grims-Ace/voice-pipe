@@ -82,7 +82,7 @@ impl SideEvent {
 
 impl Side {
         // ====================================================================
-        // Accessors
+        // Accessors and Constructor
         // ====================================================================
 
         // Return true while a proxy or the main bot is still connecting.
@@ -118,10 +118,6 @@ impl Side {
                         }
                 }
         }
-
-        // ====================================================================
-        // Constructor
-        // ====================================================================
 
         // `heard` gets the audio that the listener of this side receives.
         pub fn New(
@@ -182,7 +178,7 @@ impl Side {
                         }
                         SideEvent::ProxyOpened(_, user, Err(account)) => {
                                 self._opening.remove(&user);
-                                self.getPlatformHub().RestProxy(account);
+                                self.getPlatformHub().HoldProxy(account);
                         }
                         SideEvent::MainOpened(_, Some(voice)) => {
                                 self._isMainOpening = false;
@@ -242,6 +238,7 @@ impl Side {
                 join_all(tasks).await;
         }
 
+        // Close the proxies of users that left the linked channel.
         fn RemoveDeparted(&mut self, users: &HashSet<String>) {
                 let departed: Vec<String> = self
                         ._proxies
@@ -303,11 +300,12 @@ impl Side {
                 self.SpawnProxyClose(session);
         }
 
+        // Close a proxy in the background and give its account to the pool.
         fn SpawnProxyClose(&self, session: ProxySession) -> JoinHandle<()> {
                 let (hub, platform) = (self._hub.clone(), self._platform);
                 tokio::spawn(async move {
                         let account = session.Close().await;
-                        hub.getPlatform(platform).ReturnProxy(account);
+                        hub.getPlatform(platform).ReleaseProxy(account);
                 })
         }
 
@@ -401,7 +399,7 @@ impl Side {
         }
 
         // Send one mixed overflow frame through the main bot.
-        pub fn PumpOverflow(&mut self) {
+        pub fn SendOverflow(&mut self) {
                 if self._overflow.isEmpty() { return; }
                 let Some(frame) = self._overflow.Pull() else { return };
                 if let Some(main) = &self._main { main.SendFrame(frame); }
@@ -503,10 +501,10 @@ async fn DiscardEvent(hub: &Hub, event: SideEvent) {
         match event {
                 SideEvent::ProxyOpened(platform, _, Ok(session)) => {
                         let account = session.Close().await;
-                        hub.getPlatform(platform).ReturnProxy(account);
+                        hub.getPlatform(platform).ReleaseProxy(account);
                 }
                 SideEvent::ProxyOpened(platform, _, Err(account)) => {
-                        hub.getPlatform(platform).RestProxy(account)
+                        hub.getPlatform(platform).HoldProxy(account)
                 }
                 // The link already gave back the main slot, so only close the
                 // media. A gateway leave could remove the bot from a new link.

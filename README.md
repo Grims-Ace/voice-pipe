@@ -229,9 +229,9 @@ Optional settings:
 | `general.overflow_name` | `Multiple Users` | Nickname of the overflow bot |
 | `general.proxy_idle_name` | `Voice Pipe Proxy {number}` | Nickname of a free proxy |
 | `general.voice_threshold` | `200` | Level below which audio is silence |
-| `general.silence_hangover_ms` | `300` | Send time after speech stops |
+| `general.silence_hangover_ms` | `300` | Send time after speech stops (minimum 20) |
 | `general.jitter_frames` | `3` | Overflow mixer buffer (20 ms frames) |
-| `discord.command_role_ids` | `[]` | Roles that can toggle (empty = all) |
+| `discord.command_role_ids` | `[]` | Roles that can toggle (empty = all, with a warning at start) |
 | `fluxer.livekit_url` | local edge | `""` uses the URL from Fluxer |
 | `fluxer.host_header` | none | Host name for local requests |
 | `[[links]]` | none | Fixed channel pairs |
@@ -294,13 +294,17 @@ the default prefix `vp!`.
 | `vp!toggle` | Turns the bridge off or on. When it is off, all bots leave voice and the bridge ignores users. When `command_role_ids` is set, only those roles can use it. |
 | `vp!status` | Shows whether the bridge is on, the free proxies, where the main bots are, and each active link: users on each side, mirrors, and seconds of relayed speech. |
 
+Each user can send one command every 3 seconds. The bridge ignores other
+commands from that user during this time, so that command spam does not
+cause API rate limits.
+
 Example status:
 
 ```
 voice-pipe status
 Bridge: on
 Discord proxies free: 1 of 2 · main bot: not in voice
-Fluxer proxies free: 0 of 1 · main bot: overflow in General
+Fluxer proxies free: 0 of 2 (1 wait after a failure) · main bot: overflow in General
 Active links: 1
 
 General · audio relay on

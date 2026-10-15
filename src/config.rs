@@ -43,6 +43,10 @@ const DEFAULT_LOG_LEVEL: &str = "info";
 const DEFAULT_VOICE_THRESHOLD: f32 = 200.0;
 const DEFAULT_HANGOVER_MS: u64 = 300;
 const DEFAULT_JITTER_FRAMES: usize = 3;
+// Shortest hangover. Below one 20 ms frame, playback stops after each frame.
+const HANGOVER_MIN_MS: u64 = 20;
+// Hosts where a plain (not encrypted) URL does not expose the tokens.
+const LOCAL_HOSTS: [&str; 3] = ["127.0.0.1", "localhost", "[::1]"];
 
 // ============================================================================
 // Settings Types
@@ -152,9 +156,19 @@ impl GeneralSettings {
                 if self._commandPrefix.trim().is_empty() {
                         bail!("general.command_prefix must not be empty");
                 }
+                if self._voiceThreshold.is_nan() {
+                        bail!("general.voice_threshold must be a number");
+                }
                 if self._voiceThreshold < 0.0 {
                         warn!("general.voice_threshold is below 0, using 0");
                         self._voiceThreshold = 0.0;
+                }
+                if self._silenceHangoverMs < HANGOVER_MIN_MS {
+                        warn!(
+                                "general.silence_hangover_ms is below \
+                                 {HANGOVER_MIN_MS}, using {HANGOVER_MIN_MS}"
+                        );
+                        self._silenceHangoverMs = HANGOVER_MIN_MS;
                 }
                 if self._jitterFrames == 0 {
                         warn!("general.jitter_frames is 0, using 1");
@@ -249,8 +263,24 @@ impl PlatformSettings {
                 }
                 if platform == Platform::Discord {
                         RequireNumber(&self._guildId, "discord.guild_id")?;
+                        self.WarnOpenCommands();
                 }
+                WarnPlainUrl(&self._apiUrl, &format!("{label}.api_url"));
+                WarnPlainUrl(
+                        &self._gatewayUrl,
+                        &format!("{label}.gateway_url"),
+                );
                 Ok(())
+        }
+
+        // Without command roles, every member of the guild can turn the
+        // bridge off.
+        fn WarnOpenCommands(&self) {
+                if !self._commandRoleIds.is_empty() { return; }
+                warn!(
+                        "discord.command_role_ids is empty, so every member \
+                         can use the toggle command"
+                );
         }
 
         // Remove empty and repeated proxy tokens, and the main token.
@@ -270,10 +300,7 @@ impl PlatformSettings {
         }
 }
 
-// ============================================================================
-// Link Settings
-// ============================================================================
-
+// Read the channel IDs of one fixed link.
 impl LinkSettings {
         pub fn getChannelId(&self, platform: Platform) -> &str {
                 match platform {
@@ -355,6 +382,27 @@ fn CleanToken(token: &str) -> String {
         trimmed.strip_prefix("Bot ").unwrap_or(trimmed).trim().to_string()
 }
 
+// Warn when a URL sends the tokens without encryption to another machine.
+fn WarnPlainUrl(url: &str, name: &str) {
+        if !isPlainRemoteUrl(url) { return; }
+        warn!("{name} is not encrypted and not local, tokens are visible");
+}
+
+fn isPlainRemoteUrl(url: &str) -> bool {
+        let Some(rest) = url
+                .strip_prefix("http://")
+                .or_else(|| url.strip_prefix("ws://"))
+        else {
+                return false;
+        };
+        let authority = rest.split(['/', '?']).next().unwrap_or_default();
+        let host = match authority.rsplit_once(':') {
+                Some((host, port)) if !port.contains(']') => host,
+                _ => authority,
+        };
+        !LOCAL_HOSTS.contains(&host.to_ascii_lowercase().as_str())
+}
+
 // Discord IDs must be numbers, because the voice library uses u64 values.
 fn RequireNumber(value: &str, name: &str) -> Result<()> {
         if value.trim().parse::<u64>().is_err() {
@@ -414,6 +462,29 @@ mod tests {
                 let general = GeneralSettings::default();
                 let name = general.getProxyIdleName(2);
                 assert_eq!(name.as_deref(), Some("Voice Pipe Proxy 2"));
+        }
+
+        #[test]
+        fn PlainUrlIsRemoteOnlyOffLocalHost() {
+                assert!(!isPlainRemoteUrl("http://127.0.0.1:8080/api/v1"));
+                assert!(!isPlainRemoteUrl("ws://localhost/gateway"));
+                assert!(!isPlainRemoteUrl("ws://[::1]:8080/gateway"));
+                assert!(!isPlainRemoteUrl("https://chat.example.com/api"));
+                assert!(isPlainRemoteUrl("http://chat.example.com/api"));
+                assert!(isPlainRemoteUrl("ws://10.0.0.5:8080/gateway"));
+        }
+
+        #[test]
+        fn ShortHangoverIsRaised() {
+                let text = MINIMAL.replace(
+                        "[discord]",
+                        "[general]\nsilence_hangover_ms = 0\n[discord]",
+                );
+                let config = Parse(&text);
+                assert_eq!(
+                        config.getGeneral().getSilenceHangover(),
+                        Duration::from_millis(HANGOVER_MIN_MS)
+                );
         }
 
         #[test]

@@ -163,7 +163,7 @@ impl SessionTask {
                 }
                 let end = self.RunLoop(&mut socket, interval).await;
                 if matches!(end, ConnectionEnd::Stop) {
-                        self.SayGoodbye(&mut socket).await;
+                        self.SendCloseFrame(&mut socket).await;
                 }
                 end
         }
@@ -208,12 +208,9 @@ impl SessionTask {
                                 LoopAction::Acknowledge => is_acked = true,
                                 LoopAction::End(end) => return end,
                                 LoopAction::Send(payload) => {
-                                        if socket
-                                                .send(Message::text(payload))
-                                                .await
-                                                .is_err()
-                                        {
-                                                return ConnectionEnd::Reconnect;
+                                        let sent = SendPayload(socket, payload);
+                                        if let Some(end) = sent.await {
+                                                return end;
                                         }
                                 }
                         }
@@ -222,7 +219,7 @@ impl SessionTask {
 
         // Send the queued payloads (such as a voice leave) and close the
         // socket with a normal code, so that the server ends the session.
-        async fn SayGoodbye(&mut self, socket: &mut Socket) {
+        async fn SendCloseFrame(&mut self, socket: &mut Socket) {
                 while let Ok(payload) = self._outgoing.try_recv() {
                         let _ = socket.send(Message::text(payload)).await;
                 }
@@ -261,6 +258,7 @@ impl SessionTask {
                 ))
         }
 
+        // Read one socket frame. End the connection on a read error or a close.
         fn HandleSocketFrame(
                 &mut self,
                 frame: Option<Result<Message, SocketError>>,
@@ -285,17 +283,21 @@ impl SessionTask {
                 };
                 match message {
                         Message::Text(text) => self.HandleText(text.as_str()),
-                        Message::Binary(data) => {
-                                match std::str::from_utf8(&data) {
-                                        Ok(text) => self.HandleText(text),
-                                        Err(_) => LoopAction::Continue,
-                                }
-                        }
+                        Message::Binary(data) => self.HandleBinary(&data),
                         Message::Close(frame) => self.HandleClose(frame),
                         _ => LoopAction::Continue,
                 }
         }
 
+        // Read a binary frame as JSON text. Skip it if it is not UTF-8.
+        fn HandleBinary(&mut self, data: &[u8]) -> LoopAction {
+                let Ok(text) = std::str::from_utf8(data) else {
+                        return LoopAction::Continue;
+                };
+                self.HandleText(text)
+        }
+
+        // Save the sequence number and act on the opcode of a JSON frame.
         fn HandleText(&mut self, text: &str) -> LoopAction {
                 let Ok(frame) = serde_json::from_str::<Incoming>(text) else {
                         warn!(
@@ -323,6 +325,7 @@ impl SessionTask {
                 }
         }
 
+        // Act on session events here and give all other events to the view.
         fn HandleDispatch(&mut self, frame: &Incoming) -> LoopAction {
                 let kind = frame.t.as_deref().unwrap_or_default();
                 match kind {
@@ -343,6 +346,7 @@ impl SessionTask {
                 LoopAction::Continue
         }
 
+        // Save the session values that a later resume needs.
         fn HandleReady(&mut self, data: &Value) {
                 let Some(ready) = ParseData::<Ready>(data) else { return };
                 self._session._sessionId = Some(ready.session_id);
@@ -388,6 +392,7 @@ impl SessionTask {
         // Login Helpers
         // ====================================================================
 
+        // Resume the old session if there is one, else start a new session.
         fn BuildLogin(&self) -> String {
                 let token = self._settings.getToken();
                 match &self._session._sessionId {
@@ -418,6 +423,7 @@ impl SessionTask {
                 }
         }
 
+        // Open the socket, with the Host header when the config sets one.
         async fn Open(&self) -> Result<Socket> {
                 let url = self.getConnectUrl();
                 let mut request = url.as_str().into_client_request()?;
@@ -437,6 +443,15 @@ impl SessionTask {
 // ============================================================================
 // Helper Functions
 // ============================================================================
+
+// Send one payload. Return a reconnect when the socket cannot send.
+async fn SendPayload(
+        socket: &mut Socket,
+        payload: String,
+) -> Option<ConnectionEnd> {
+        let sent = socket.send(Message::text(payload)).await;
+        sent.is_err().then_some(ConnectionEnd::Reconnect)
+}
 
 // Read frames until the HELLO frame and return the heartbeat interval.
 async fn ReadHello(socket: &mut Socket) -> Result<Duration> {

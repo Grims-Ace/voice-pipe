@@ -286,8 +286,8 @@ impl Link {
                                 self.Relay(platform, &speaker, frame)
                         }
                         Wake::Mix => {
-                                self._discord.PumpOverflow();
-                                self._fluxer.PumpOverflow();
+                                self._discord.SendOverflow();
+                                self._fluxer.SendOverflow();
                         }
                         Wake::Check => self.Check(),
                 }
@@ -366,20 +366,24 @@ impl Link {
 
         // Wait for connections that are still opening, then close all bots.
         async fn Close(mut self) {
-                let deadline = Instant::now() + DRAIN_TIMEOUT;
-                while self._discord.hasPendingOpens()
-                        || self._fluxer.hasPendingOpens()
-                {
-                        match tokio::time::timeout_at(
-                                deadline,
-                                self._events.recv(),
-                        )
-                        .await
-                        {
-                                Ok(Some(event)) => self.HandleEvent(event),
-                                _ => break,
-                        }
-                }
+                self.WaitForPendingOpens().await;
                 tokio::join!(self._discord.Close(), self._fluxer.Close());
+        }
+
+        // Store the results of connections that are still opening, so that
+        // Close can disconnect them. Stop at the drain time limit.
+        async fn WaitForPendingOpens(&mut self) {
+                let deadline = Instant::now() + DRAIN_TIMEOUT;
+                while self.hasPendingOpens() {
+                        let next = self._events.recv();
+                        let waited = tokio::time::timeout_at(deadline, next);
+                        let Ok(Some(event)) = waited.await else { return };
+                        self.HandleEvent(event);
+                }
+        }
+
+        fn hasPendingOpens(&self) -> bool {
+                self._discord.hasPendingOpens()
+                        || self._fluxer.hasPendingOpens()
         }
 }
