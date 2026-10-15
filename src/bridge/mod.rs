@@ -1,0 +1,69 @@
+// ============================================================================
+// ============================================================================
+// Run the bridge: log in all bots, run the coordinator, and start again with
+// a delay when a main bot connection fails.
+// ============================================================================
+// ============================================================================
+
+mod coordinator;
+mod hub;
+mod link;
+mod matching;
+mod overflow;
+mod proxy;
+mod side;
+mod status;
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::Result;
+use tokio::sync::watch;
+use tracing::{error, warn};
+
+use crate::config::Config;
+use coordinator::Coordinator;
+use hub::Hub;
+
+const MAX_RESTART_DELAY: Duration = Duration::from_secs(120);
+
+// Run the bridge until `stop` becomes true. Start again after an error.
+pub async fn Supervise(config: Config, mut stop: watch::Receiver<bool>) {
+        let config = Arc::new(config);
+        let mut failures: u32 = 0;
+        loop {
+                match RunOnce(config.clone(), stop.clone()).await {
+                        Ok(()) => return,
+                        Err(e) => {
+                                error!(
+                                        error = %format!("{e:#}"),
+                                        "bridge stopped with an error",
+                                )
+                        }
+                }
+                failures += 1;
+                let wait = RestartDelay(failures);
+                warn!(wait_secs = wait.as_secs(), "bridge starts again");
+                tokio::select! {
+                        _ = tokio::time::sleep(wait) => {}
+                        _ = stop.wait_for(|stop| *stop) => return,
+                }
+        }
+}
+
+// Log in, run the coordinator, and log out.
+async fn RunOnce(
+        config: Arc<Config>,
+        stop: watch::Receiver<bool>,
+) -> Result<()> {
+        let hub = Hub::Start(config).await?;
+        let result = Coordinator::New(hub.clone()).Run(stop).await;
+        hub.Close().await;
+        result
+}
+
+// Exponential delay: 4, 8, 16, ... seconds, with a 2 minute limit.
+fn RestartDelay(failures: u32) -> Duration {
+        Duration::from_secs(2u64.saturating_pow(failures.min(7) + 1))
+                .min(MAX_RESTART_DELAY)
+}

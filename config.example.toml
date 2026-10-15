@@ -1,0 +1,116 @@
+# =============================================================================
+# voice-pipe configuration
+#
+# Copy this file to config.toml and fill in the values.
+# config.toml is in .gitignore. Do not commit tokens.
+# Values that you remove use the default that the comment shows.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# General settings
+# -----------------------------------------------------------------------------
+[general]
+# Prefix for the Discord chat commands. With "vp!" the commands are
+# vp!help, vp!toggle, and vp!status.
+command_prefix = "vp!"
+
+# Start with the bridge on (true) or off (false). vp!toggle changes it.
+start_enabled = true
+
+# Link voice channels that have the same name on both platforms (case and
+# outer spaces are ignored). The [[links]] entries below are used first.
+match_by_name = true
+
+# Nickname of the main bot when it speaks for users that have no proxy.
+overflow_name = "Multiple Users"
+
+# Log filter: error, warn, info, debug, or a tracing filter such as
+# "info,voice_pipe=debug". The RUST_LOG variable replaces this value.
+log_level = "info"
+
+# Frame level (RMS, 0 to 32768) below which audio is silence. Silence is not
+# sent. Make it higher if background noise opens the relay. Default 200.
+voice_threshold = 200
+
+# Time (ms) that a bot keeps sending after speech stops, so that the ends of
+# words are not cut. Default 300.
+silence_hangover_ms = 300
+
+# Frames (20 ms each) that the overflow mixer buffers for each speaker.
+# More frames give more delay but survive larger network problems. Default 3.
+jitter_frames = 3
+
+# -----------------------------------------------------------------------------
+# Discord
+# -----------------------------------------------------------------------------
+[discord]
+# Server ID: turn on Developer Mode, right-click the server, Copy Server ID.
+guild_id = ""
+
+# Token of the main bot. It watches the voice channels, answers the
+# commands, and joins voice as "Multiple Users" when no proxy is free.
+# It needs the Message Content intent (see README).
+main_token = ""
+
+# Tokens of the proxy bots. Each proxy copies the name and avatar of one
+# Fluxer user while that user is in a linked channel. Use as many as the
+# number of Fluxer users that you expect at the same time. Can be empty.
+proxy_tokens = [
+        # "proxy-token-1",
+        # "proxy-token-2",
+]
+
+# Role IDs that can use the toggle command. Empty = everyone can use it.
+command_role_ids = []
+
+# Discord URLs. You do not need to change these.
+# api_url = "https://discord.com/api/v10"
+# gateway_url = "wss://gateway.discord.gg/?v=10&encoding=json"
+
+# -----------------------------------------------------------------------------
+# Fluxer (self-hosted, on this machine)
+# -----------------------------------------------------------------------------
+[fluxer]
+# Community (guild) ID of your Fluxer server.
+guild_id = ""
+
+# Token of the main Fluxer bot.
+main_token = ""
+
+# Tokens of the Fluxer proxy bots. Each proxy copies the name and avatar of
+# one Discord user. Can be empty.
+proxy_tokens = [
+        # "proxy-token-1",
+]
+
+# Fluxer runs on this machine, so the bridge talks to it on the local edge
+# port and does not go through Cloudflare or nginx. The defaults are for a
+# stack that binds 127.0.0.1:8080 (FLUXER_EDGE_BIND). Change the port if
+# your stack uses another one.
+api_url = "http://127.0.0.1:8080/api/v1"
+gateway_url = "ws://127.0.0.1:8080/gateway?v=1&encoding=json"
+
+# LiveKit signaling URL for voice. The default sends signaling to the local
+# edge. Set it to "" to use the public URL that Fluxer sends (this goes
+# through Cloudflare and nginx). Voice media always uses UDP 7882 or
+# TCP 7881 directly.
+livekit_url = "ws://127.0.0.1:8080/livekit"
+
+# Avatar image URL. {user_id} and {hash} are replaced. Use the same host and
+# path that the Fluxer web app uses for avatars.
+avatar_url = "http://127.0.0.1:8080/media/avatars/{user_id}/{hash}.png?size=128"
+
+# Host header for local requests. Set this to your public host name (for
+# example "chat.example.com") if the Fluxer edge routes requests by host
+# name and does not answer on 127.0.0.1. Leave empty if it is not needed.
+host_header = ""
+
+# -----------------------------------------------------------------------------
+# Fixed channel links (optional)
+# -----------------------------------------------------------------------------
+# Link two channels that do not have the same name. Add one block for each
+# link. Each channel can be in only one link.
+#
+# [[links]]
+# discord_channel_id = "123456789012345678"
+# fluxer_channel_id = "987654321098765432"

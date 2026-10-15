@@ -1,0 +1,409 @@
+// ============================================================================
+// ============================================================================
+// Load config.toml, fill in default values, and make sure that the settings
+// are valid before the bridge starts.
+// ============================================================================
+// ============================================================================
+
+use std::collections::HashSet;
+use std::fs;
+use std::path::Path;
+use std::time::Duration;
+
+use anyhow::{Context, Result, bail};
+use serde::Deserialize;
+use tracing::warn;
+
+use crate::platform::{PLATFORMS, Platform};
+
+// ============================================================================
+// Default Values
+// ============================================================================
+
+const DISCORD_API_URL: &str = "https://discord.com/api/v10";
+const DISCORD_GATEWAY_URL: &str =
+        "wss://gateway.discord.gg/?v=10&encoding=json";
+const DISCORD_AVATAR_URL: &str =
+        "https://cdn.discordapp.com/avatars/{user_id}/{hash}.png?size=128";
+const DISCORD_GUILD_AVATAR_URL: &str = "https://cdn.discordapp.com/guilds/\
+        {guild_id}/users/{user_id}/avatars/{hash}.png?size=128";
+// Fluxer runs on the same machine, so the defaults use the local edge port
+// and do not go through Cloudflare or nginx.
+const FLUXER_API_URL: &str = "http://127.0.0.1:8080/api/v1";
+const FLUXER_GATEWAY_URL: &str =
+        "ws://127.0.0.1:8080/gateway?v=1&encoding=json";
+const FLUXER_LIVEKIT_URL: &str = "ws://127.0.0.1:8080/livekit";
+const FLUXER_AVATAR_URL: &str =
+        "http://127.0.0.1:8080/media/avatars/{user_id}/{hash}.png?size=128";
+
+const DEFAULT_PREFIX: &str = "vp!";
+const DEFAULT_OVERFLOW_NAME: &str = "Multiple Users";
+const DEFAULT_LOG_LEVEL: &str = "info";
+const DEFAULT_VOICE_THRESHOLD: f32 = 200.0;
+const DEFAULT_HANGOVER_MS: u64 = 300;
+const DEFAULT_JITTER_FRAMES: usize = 3;
+
+// ============================================================================
+// Settings Types
+// ============================================================================
+
+// Settings that control the whole bridge.
+#[derive(Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GeneralSettings {
+        #[serde(rename = "command_prefix")]
+        _commandPrefix: String,
+        #[serde(rename = "start_enabled")]
+        _isStartEnabled: bool,
+        #[serde(rename = "match_by_name")]
+        _isNameMatchEnabled: bool,
+        #[serde(rename = "overflow_name")]
+        _overflowName: String,
+        #[serde(rename = "log_level")]
+        _logLevel: String,
+        #[serde(rename = "voice_threshold")]
+        _voiceThreshold: f32,
+        #[serde(rename = "silence_hangover_ms")]
+        _silenceHangoverMs: u64,
+        #[serde(rename = "jitter_frames")]
+        _jitterFrames: usize,
+}
+
+// Settings for the bots and the server on one platform.
+#[derive(Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct PlatformSettings {
+        #[serde(rename = "guild_id")]
+        _guildId: String,
+        #[serde(rename = "main_token")]
+        _mainToken: String,
+        #[serde(rename = "proxy_tokens")]
+        _proxyTokens: Vec<String>,
+        #[serde(rename = "api_url")]
+        _apiUrl: String,
+        #[serde(rename = "gateway_url")]
+        _gatewayUrl: String,
+        #[serde(rename = "livekit_url")]
+        _livekitUrl: Option<String>,
+        #[serde(rename = "avatar_url")]
+        _avatarUrl: String,
+        #[serde(rename = "guild_avatar_url")]
+        _guildAvatarUrl: String,
+        #[serde(rename = "host_header")]
+        _hostHeader: String,
+        #[serde(rename = "command_role_ids")]
+        _commandRoleIds: Vec<String>,
+}
+
+// One fixed pair of voice channels to bridge.
+#[derive(Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct LinkSettings {
+        #[serde(rename = "discord_channel_id")]
+        _discordChannelId: String,
+        #[serde(rename = "fluxer_channel_id")]
+        _fluxerChannelId: String,
+}
+
+// All settings from config.toml.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Config {
+        #[serde(rename = "general", default)]
+        _general: GeneralSettings,
+        #[serde(rename = "discord")]
+        _discord: PlatformSettings,
+        #[serde(rename = "fluxer")]
+        _fluxer: PlatformSettings,
+        #[serde(rename = "links", default)]
+        _links: Vec<LinkSettings>,
+}
+
+// ============================================================================
+// General Settings
+// ============================================================================
+
+impl GeneralSettings {
+        pub fn getCommandPrefix(&self) -> &str { &self._commandPrefix }
+        pub fn isStartEnabled(&self) -> bool { self._isStartEnabled }
+        pub fn isNameMatchEnabled(&self) -> bool { self._isNameMatchEnabled }
+        pub fn getOverflowName(&self) -> &str { &self._overflowName }
+        pub fn getLogLevel(&self) -> &str { &self._logLevel }
+        pub fn getVoiceThreshold(&self) -> f32 { self._voiceThreshold }
+        pub fn getJitterFrames(&self) -> usize { self._jitterFrames }
+
+        pub fn getSilenceHangover(&self) -> Duration {
+                Duration::from_millis(self._silenceHangoverMs)
+        }
+
+        // Correct values that are out of range, and tell the operator.
+        fn Validate(&mut self) -> Result<()> {
+                if self._commandPrefix.trim().is_empty() {
+                        bail!("general.command_prefix must not be empty");
+                }
+                if self._voiceThreshold < 0.0 {
+                        warn!("general.voice_threshold is below 0, using 0");
+                        self._voiceThreshold = 0.0;
+                }
+                if self._jitterFrames == 0 {
+                        warn!("general.jitter_frames is 0, using 1");
+                        self._jitterFrames = 1;
+                }
+                Ok(())
+        }
+}
+
+impl Default for GeneralSettings {
+        fn default() -> Self {
+                Self {
+                        _commandPrefix: DEFAULT_PREFIX.into(),
+                        _isStartEnabled: true,
+                        _isNameMatchEnabled: true,
+                        _overflowName: DEFAULT_OVERFLOW_NAME.into(),
+                        _logLevel: DEFAULT_LOG_LEVEL.into(),
+                        _voiceThreshold: DEFAULT_VOICE_THRESHOLD,
+                        _silenceHangoverMs: DEFAULT_HANGOVER_MS,
+                        _jitterFrames: DEFAULT_JITTER_FRAMES,
+                }
+        }
+}
+
+// ============================================================================
+// Platform Settings
+// ============================================================================
+
+impl PlatformSettings {
+        pub fn getGuildId(&self) -> &str { &self._guildId }
+        pub fn getMainToken(&self) -> &str { &self._mainToken }
+        pub fn getProxyTokens(&self) -> &[String] { &self._proxyTokens }
+        pub fn getApiUrl(&self) -> &str { &self._apiUrl }
+        pub fn getGatewayUrl(&self) -> &str { &self._gatewayUrl }
+        pub fn getAvatarUrl(&self) -> &str { &self._avatarUrl }
+        pub fn getCommandRoleIds(&self) -> &[String] { &self._commandRoleIds }
+
+        // Return the LiveKit URL to use instead of the URL that the server
+        // sends. Return None to use the URL from the server.
+        pub fn getLivekitUrl(&self) -> Option<&str> {
+                self._livekitUrl.as_deref().filter(|u| !u.is_empty())
+        }
+
+        pub fn getGuildAvatarUrl(&self) -> Option<&str> {
+                Some(self._guildAvatarUrl.as_str()).filter(|u| !u.is_empty())
+        }
+
+        pub fn getHostHeader(&self) -> Option<&str> {
+                Some(self._hostHeader.as_str()).filter(|h| !h.is_empty())
+        }
+
+        // Fill empty values with the defaults for the platform.
+        fn ApplyDefaults(&mut self, platform: Platform) {
+                let (api, gateway, avatar, guild_avatar) = match platform {
+                        Platform::Discord => (
+                                DISCORD_API_URL,
+                                DISCORD_GATEWAY_URL,
+                                DISCORD_AVATAR_URL,
+                                DISCORD_GUILD_AVATAR_URL,
+                        ),
+                        Platform::Fluxer => (
+                                FLUXER_API_URL,
+                                FLUXER_GATEWAY_URL,
+                                FLUXER_AVATAR_URL,
+                                "",
+                        ),
+                };
+                FillEmpty(&mut self._apiUrl, api);
+                FillEmpty(&mut self._gatewayUrl, gateway);
+                FillEmpty(&mut self._avatarUrl, avatar);
+                FillEmpty(&mut self._guildAvatarUrl, guild_avatar);
+                if platform == Platform::Fluxer && self._livekitUrl.is_none() {
+                        self._livekitUrl = Some(FLUXER_LIVEKIT_URL.into());
+                }
+                self._apiUrl = self._apiUrl.trim_end_matches('/').to_string();
+        }
+
+        // Make sure that the bot can log in, and clean the token list.
+        fn Validate(&mut self, platform: Platform) -> Result<()> {
+                let label = platform.getLabel();
+                if self._guildId.trim().is_empty() {
+                        bail!("{label}.guild_id must be set");
+                }
+                self._mainToken = CleanToken(&self._mainToken);
+                if self._mainToken.is_empty() {
+                        bail!("{label}.main_token must be set");
+                }
+                self._proxyTokens = self.FindUniqueProxyTokens(label);
+                if self._proxyTokens.is_empty() {
+                        warn!("{label} has no proxy tokens");
+                }
+                if platform == Platform::Discord {
+                        RequireNumber(&self._guildId, "discord.guild_id")?;
+                }
+                Ok(())
+        }
+
+        // Remove empty and repeated proxy tokens, and the main token.
+        fn FindUniqueProxyTokens(&self, label: &str) -> Vec<String> {
+                let mut seen = HashSet::from([self._mainToken.clone()]);
+                let mut tokens = Vec::new();
+                for raw in &self._proxyTokens {
+                        let token = CleanToken(raw);
+                        if token.is_empty() { continue; }
+                        if !seen.insert(token.clone()) {
+                                warn!("{label}.proxy_tokens repeats a token");
+                                continue;
+                        }
+                        tokens.push(token);
+                }
+                tokens
+        }
+}
+
+// ============================================================================
+// Link Settings
+// ============================================================================
+
+impl LinkSettings {
+        pub fn getChannelId(&self, platform: Platform) -> &str {
+                match platform {
+                        Platform::Discord => &self._discordChannelId,
+                        Platform::Fluxer => &self._fluxerChannelId,
+                }
+        }
+}
+
+// ============================================================================
+// Config
+// ============================================================================
+
+impl Config {
+        pub fn getGeneral(&self) -> &GeneralSettings { &self._general }
+        pub fn getLinks(&self) -> &[LinkSettings] { &self._links }
+
+        pub fn getPlatform(&self, platform: Platform) -> &PlatformSettings {
+                match platform {
+                        Platform::Discord => &self._discord,
+                        Platform::Fluxer => &self._fluxer,
+                }
+        }
+
+        // Read the config file, fill in defaults, and validate all settings.
+        pub fn Load(path: &Path) -> Result<Config> {
+                let text = fs::read_to_string(path).with_context(|| {
+                        let name = path.display();
+                        format!("cannot read {name}, copy config.example.toml")
+                })?;
+                let mut config: Config =
+                        toml::from_str(&text).with_context(|| {
+                                format!("{} is not valid", path.display())
+                        })?;
+                config.Prepare()?;
+                Ok(config)
+        }
+
+        fn getPlatformMut(
+                &mut self,
+                platform: Platform,
+        ) -> &mut PlatformSettings {
+                match platform {
+                        Platform::Discord => &mut self._discord,
+                        Platform::Fluxer => &mut self._fluxer,
+                }
+        }
+
+        // Apply defaults and validate each part of the config.
+        fn Prepare(&mut self) -> Result<()> {
+                self._general.Validate()?;
+                for platform in PLATFORMS {
+                        let settings = self.getPlatformMut(platform);
+                        settings.ApplyDefaults(platform);
+                        settings.Validate(platform)?;
+                }
+                for (i, link) in self._links.iter().enumerate() {
+                        let name = format!("links[{i}].discord_channel_id");
+                        RequireNumber(&link._discordChannelId, &name)?;
+                        if link._fluxerChannelId.trim().is_empty() {
+                                bail!("links[{i}].fluxer_channel_id is empty");
+                        }
+                }
+                Ok(())
+        }
+}
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+fn FillEmpty(value: &mut String, default: &str) {
+        if value.trim().is_empty() { *value = default.to_string(); }
+}
+
+// Remove spaces and a "Bot " prefix, because the bridge adds that prefix.
+fn CleanToken(token: &str) -> String {
+        let trimmed = token.trim();
+        trimmed.strip_prefix("Bot ").unwrap_or(trimmed).trim().to_string()
+}
+
+// Discord IDs must be numbers, because the voice library uses u64 values.
+fn RequireNumber(value: &str, name: &str) -> Result<()> {
+        if value.trim().parse::<u64>().is_err() {
+                bail!("{name} must be a number, found \"{value}\"");
+        }
+        Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+        use super::*;
+
+        const MINIMAL: &str = r#"
+                [discord]
+                guild_id = "123"
+                main_token = "Bot abc"
+                proxy_tokens = ["p1", "p1", "", "abc"]
+
+                [fluxer]
+                guild_id = "456"
+                main_token = "xyz"
+        "#;
+
+        fn Parse(text: &str) -> Config {
+                let mut config: Config = toml::from_str(text).unwrap();
+                config.Prepare().unwrap();
+                config
+        }
+
+        #[test]
+        fn DefaultsPointFluxerAtLocalHost() {
+                let config = Parse(MINIMAL);
+                let fluxer = config.getPlatform(Platform::Fluxer);
+                assert!(fluxer.getApiUrl().starts_with("http://127.0.0.1"));
+                assert_eq!(fluxer.getLivekitUrl(), Some(FLUXER_LIVEKIT_URL));
+        }
+
+        #[test]
+        fn TokensAreCleanAndUnique() {
+                let config = Parse(MINIMAL);
+                let discord = config.getPlatform(Platform::Discord);
+                assert_eq!(discord.getMainToken(), "abc");
+                assert_eq!(discord.getProxyTokens(), ["p1".to_string()]);
+        }
+
+        #[test]
+        fn ExampleConfigIsValid() {
+                let text = include_str!("../config.example.toml")
+                        .replace("guild_id = \"\"", "guild_id = \"1\"")
+                        .replace("main_token = \"\"", "main_token = \"t\"");
+                let config = Parse(&text);
+                assert_eq!(config.getGeneral().getCommandPrefix(), "vp!");
+        }
+
+        #[test]
+        fn EmptyLivekitUrlUsesServerUrl() {
+                let text = format!("{MINIMAL}\nlivekit_url = \"\"\n");
+                let config = Parse(&text);
+                assert_eq!(
+                        config.getPlatform(Platform::Fluxer).getLivekitUrl(),
+                        None
+                );
+        }
+}
