@@ -63,6 +63,8 @@ joins together. The bridge finds links in two ways:
 2. Channels with the same name on both platforms (when `match_by_name` is
    `true`). Outer spaces are ignored, but names are case-sensitive (for
    example, `General` matches ` General `, but does not match `general`).
+   When `ignore_afk_channels` is `true`, the AFK channel of each server is
+   not linked by name. A `[[links]]` entry can still link it.
 
 The bridge can run many links at the same time. The proxy pool is shared
 between all links. The main bot can be in only one voice channel for each
@@ -247,6 +249,7 @@ Optional settings:
 | `general.command_prefix` | `vp!` | Prefix of the chat commands |
 | `general.start_enabled` | `true` | Start with the bridge on |
 | `general.match_by_name` | `true` | Link channels with the same name |
+| `general.ignore_afk_channels` | `true` | Do not link AFK channels by name |
 | `general.overflow_name` | `Multiple Users` | Nickname of a group bot |
 | `general.proxy_idle_name` | `Voice Pipe Proxy {number}` | Nickname of a free proxy |
 | `general.voice_threshold` | `200` | Level below which audio is silence |

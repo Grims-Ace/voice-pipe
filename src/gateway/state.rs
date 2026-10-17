@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::protocol::{ChannelData, GuildCreate, VoiceStateData};
+use super::protocol::{ChannelData, GuildCreate, GuildUpdate, VoiceStateData};
 
 // A voice channel, its name, and its position in the channel list.
 #[derive(Clone, Debug)]
@@ -24,6 +24,7 @@ pub struct VoiceChannel {
 struct GuildState {
         _channels: HashMap<String, VoiceChannel>,
         _userChannels: HashMap<String, String>,
+        _afkChannelId: Option<String>,
 }
 
 // The voice view of all guilds that one bot can see.
@@ -72,6 +73,11 @@ impl GatewayState {
                 self._guilds.contains_key(guild_id)
         }
 
+        // Return the AFK voice channel of a guild, if the guild has one.
+        pub fn getAfkChannelId(&self, guild_id: &str) -> Option<String> {
+                self._guilds.get(guild_id)?._afkChannelId.clone()
+        }
+
         // Return the voice channels in the order of the channel list, so
         // that "the first channel" is always the same channel.
         pub fn getVoiceChannels(&self, guild_id: &str) -> Vec<VoiceChannel> {
@@ -111,7 +117,10 @@ impl GatewayState {
 
         // Replace the view of a guild with the full snapshot from the server.
         pub fn ApplyGuildCreate(&mut self, data: &GuildCreate) {
-                let mut guild = GuildState::default();
+                let mut guild = GuildState {
+                        _afkChannelId: data.afk_channel_id.clone(),
+                        ..Default::default()
+                };
                 for channel in data.channels.iter().filter(|c| c.isVoice()) {
                         let voice = VoiceChannel::FromData(channel);
                         guild._channels.insert(channel.id.clone(), voice);
@@ -126,6 +135,18 @@ impl GatewayState {
                                 .insert(user.clone(), channel.clone());
                 }
                 self._guilds.insert(data.id.clone(), guild);
+        }
+
+        // Change the AFK channel of a known guild. An update without the
+        // key keeps the old value. An update for an unknown guild does
+        // nothing, because only the snapshot can add a guild.
+        pub fn ApplyGuildUpdate(&mut self, data: &GuildUpdate) {
+                let Some(guild) = self._guilds.get_mut(&data.id) else {
+                        return;
+                };
+                if let Some(afk) = &data.afk_channel_id {
+                        guild._afkChannelId = afk.clone();
+                }
         }
 
         // Move a user to a channel, or out of voice when the channel is null.
@@ -242,6 +263,29 @@ mod tests {
                 let update = json!({"id": "1", "guild_id": "g"});
                 state.ApplyChannelUpdate(&Channel(update));
                 assert_eq!(state.getVoiceChannels("g")[0].getName(), "General");
+        }
+
+        #[test]
+        fn GuildUpdateChangesAfkChannel() {
+                let mut state = GatewayState::default();
+                let snapshot: GuildCreate =
+                        serde_json::from_value(json!({"id": "g"})).unwrap();
+                state.ApplyGuildCreate(&snapshot);
+                let update = |value| -> GuildUpdate {
+                        serde_json::from_value(value).unwrap()
+                };
+                state.ApplyGuildUpdate(&update(
+                        json!({"guild_id": "g", "afk_channel_id": "9"}),
+                ));
+                assert_eq!(state.getAfkChannelId("g").as_deref(), Some("9"));
+                state.ApplyGuildUpdate(&update(json!({"id": "g"})));
+                assert_eq!(state.getAfkChannelId("g").as_deref(), Some("9"));
+                state.ApplyGuildUpdate(&update(
+                        json!({"id": "g", "afk_channel_id": null}),
+                ));
+                assert_eq!(state.getAfkChannelId("g"), None);
+                state.ApplyGuildUpdate(&update(json!({"id": "other"})));
+                assert!(!state.hasGuild("other"));
         }
 
         #[test]

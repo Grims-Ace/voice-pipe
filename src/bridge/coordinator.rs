@@ -21,7 +21,7 @@ use super::matching::{self, ChannelPair};
 use super::status;
 use crate::commands::{self, Command};
 use crate::gateway::{ChatMessage, VoiceChannel};
-use crate::platform::Platform;
+use crate::platform::{PLATFORMS, Platform};
 
 // Time between checks when no gateway event comes.
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(2);
@@ -123,13 +123,33 @@ impl Coordinator {
                 let fluxer = self.FindVoiceChannels(Platform::Fluxer);
                 self.WarnDuplicates(Platform::Discord, &discord);
                 self.WarnDuplicates(Platform::Fluxer, &fluxer);
+                let afk = self.FindAfkChannelIds();
+                let skipped: Vec<&str> =
+                        afk.iter().map(String::as_str).collect();
                 let config = self._hub.getConfig();
                 matching::FindPairs(
                         config.getLinks(),
                         config.getGeneral().isNameMatchEnabled(),
                         &discord,
                         &fluxer,
+                        &skipped,
                 )
+        }
+
+        // Return the AFK channels of both guilds, or none when the config
+        // does not ignore them.
+        fn FindAfkChannelIds(&self) -> Vec<String> {
+                if !self._hub.getConfig().getGeneral().isAfkIgnored() {
+                        return Vec::new();
+                }
+                PLATFORMS
+                        .iter()
+                        .filter_map(|platform| {
+                                let side = self._hub.getPlatform(*platform);
+                                let gateway = side.getGateway();
+                                gateway.getAfkChannelId(side.getGuildId())
+                        })
+                        .collect()
         }
 
         fn FindVoiceChannels(&self, platform: Platform) -> Vec<VoiceChannel> {

@@ -28,8 +28,8 @@ pub use state::VoiceChannel;
 
 use crate::platform::Platform;
 use protocol::{
-        ChannelData, GuildCreate, MessageData, ParseData, VoiceServerData,
-        VoiceStateData,
+        ChannelData, GuildCreate, GuildUpdate, MessageData, ParseData,
+        VoiceServerData, VoiceStateData,
 };
 use session::SessionTask;
 use state::GatewayState;
@@ -240,6 +240,7 @@ impl GatewayShared {
         ) {
                 match kind {
                         "GUILD_CREATE" => self.ApplyGuildCreate(data),
+                        "GUILD_UPDATE" => self.ApplyGuildUpdate(data),
                         "VOICE_STATE_UPDATE" => self.ApplyVoiceState(data),
                         "VOICE_SERVER_UPDATE" => self.ApplyVoiceServer(data),
                         "CHANNEL_CREATE" | "CHANNEL_UPDATE" => {
@@ -263,6 +264,14 @@ impl GatewayShared {
                 };
                 debug!(guild = %guild.id, "guild snapshot received");
                 self._state.lock().unwrap().ApplyGuildCreate(&guild);
+        }
+
+        // Record a change of the AFK channel of a guild.
+        fn ApplyGuildUpdate(&self, data: &Value) {
+                let Some(update) = ParseData::<GuildUpdate>(data) else {
+                        return;
+                };
+                self._state.lock().unwrap().ApplyGuildUpdate(&update);
         }
 
         // Move a user in the view, and complete a join of this bot.
@@ -327,6 +336,10 @@ impl Gateway {
 
         fn hasGuild(&self, guild_id: &str) -> bool {
                 self._shared._state.lock().unwrap().hasGuild(guild_id)
+        }
+
+        pub fn getAfkChannelId(&self, guild_id: &str) -> Option<String> {
+                self._shared._state.lock().unwrap().getAfkChannelId(guild_id)
         }
 
         pub fn getVoiceChannels(&self, guild_id: &str) -> Vec<VoiceChannel> {

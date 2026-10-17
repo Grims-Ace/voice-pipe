@@ -62,6 +62,8 @@ pub struct GeneralSettings {
         _isStartEnabled: bool,
         #[serde(rename = "match_by_name")]
         _isNameMatchEnabled: bool,
+        #[serde(rename = "ignore_afk_channels")]
+        _isAfkIgnored: bool,
         #[serde(rename = "overflow_name")]
         _overflowName: String,
         #[serde(rename = "proxy_idle_name")]
@@ -134,6 +136,7 @@ impl GeneralSettings {
         pub fn getCommandPrefix(&self) -> &str { &self._commandPrefix }
         pub fn isStartEnabled(&self) -> bool { self._isStartEnabled }
         pub fn isNameMatchEnabled(&self) -> bool { self._isNameMatchEnabled }
+        pub fn isAfkIgnored(&self) -> bool { self._isAfkIgnored }
         pub fn getOverflowName(&self) -> &str { &self._overflowName }
         pub fn getLogLevel(&self) -> &str { &self._logLevel }
         pub fn getVoiceThreshold(&self) -> f32 { self._voiceThreshold }
@@ -184,6 +187,7 @@ impl Default for GeneralSettings {
                         _commandPrefix: DEFAULT_PREFIX.into(),
                         _isStartEnabled: true,
                         _isNameMatchEnabled: true,
+                        _isAfkIgnored: true,
                         _overflowName: DEFAULT_OVERFLOW_NAME.into(),
                         _proxyIdleName: DEFAULT_PROXY_IDLE_NAME.into(),
                         _logLevel: DEFAULT_LOG_LEVEL.into(),

@@ -32,15 +32,19 @@ impl ChannelPair {
 }
 
 // Find all channel pairs. Each channel is in a maximum of one pair.
-pub fn FindPairs(
+// Name matching skips the channels in `skipped` (for example the AFK
+// channels), but a fixed link from the config can still use them.
+pub fn FindPairs<'a>(
         links: &[LinkSettings],
         is_name_match_enabled: bool,
-        discord: &[VoiceChannel],
-        fluxer: &[VoiceChannel],
+        discord: &'a [VoiceChannel],
+        fluxer: &'a [VoiceChannel],
+        skipped: &[&'a str],
 ) -> Vec<ChannelPair> {
         let mut used: HashSet<&str> = HashSet::new();
         let mut pairs = FindFixedPairs(links, discord, fluxer, &mut used);
         if is_name_match_enabled {
+                used.extend(skipped);
                 pairs.extend(FindNamePairs(discord, fluxer, &mut used));
         }
         pairs
@@ -143,7 +147,7 @@ mod tests {
         fn SameNamesArePaired() {
                 let d = Channels(&[("1", "General"), ("2", "Games")]);
                 let f = Channels(&[("a", " General "), ("b", "Music")]);
-                let pairs = FindPairs(&[], true, &d, &f);
+                let pairs = FindPairs(&[], true, &d, &f, &[]);
                 assert_eq!(pairs.len(), 1);
                 assert_eq!(pairs[0].getKey(), &LinkKey::New("1", "a"));
         }
@@ -152,7 +156,7 @@ mod tests {
         fn FixedLinksComeFirst() {
                 let d = Channels(&[("1", "General"), ("2", "Other")]);
                 let f = Channels(&[("a", "General"), ("b", "Lobby")]);
-                let pairs = FindPairs(&[Link("2", "a")], true, &d, &f);
+                let pairs = FindPairs(&[Link("2", "a")], true, &d, &f, &[]);
                 assert_eq!(pairs, vec![ChannelPair::New(&d[1], &f[0])]);
         }
 
@@ -160,7 +164,7 @@ mod tests {
         fn CaseMismatchDoesNotPair() {
                 let d = Channels(&[("1", "General")]);
                 let f = Channels(&[("a", "general")]);
-                let pairs = FindPairs(&[], true, &d, &f);
+                let pairs = FindPairs(&[], true, &d, &f, &[]);
                 assert!(pairs.is_empty());
         }
 
@@ -168,7 +172,7 @@ mod tests {
         fn FirstOfTwoSameNamesWins() {
                 let d = Channels(&[("1", "General"), ("2", " General ")]);
                 let f = Channels(&[("a", "General")]);
-                let pairs = FindPairs(&[], true, &d, &f);
+                let pairs = FindPairs(&[], true, &d, &f, &[]);
                 assert_eq!(pairs.len(), 1);
                 assert_eq!(pairs[0].getKey(), &LinkKey::New("1", "a"));
                 assert_eq!(FindDuplicateNames(&d), ["General".to_string()]);
@@ -176,9 +180,25 @@ mod tests {
         }
 
         #[test]
+        fn SkippedChannelsDoNotMatchByName() {
+                let d = Channels(&[("1", "AFK"), ("2", "General")]);
+                let f = Channels(&[("a", "AFK"), ("b", "General")]);
+                let pairs = FindPairs(&[], true, &d, &f, &["1", "a"]);
+                assert_eq!(pairs, vec![ChannelPair::New(&d[1], &f[1])]);
+        }
+
+        #[test]
+        fn FixedLinkCanUseSkippedChannel() {
+                let d = Channels(&[("1", "AFK")]);
+                let f = Channels(&[("a", "AFK")]);
+                let pairs = FindPairs(&[Link("1", "a")], true, &d, &f, &["1"]);
+                assert_eq!(pairs.len(), 1);
+        }
+
+        #[test]
         fn NameMatchCanBeOff() {
                 let d = Channels(&[("1", "General")]);
                 let f = Channels(&[("a", "General")]);
-                assert!(FindPairs(&[], false, &d, &f).is_empty());
+                assert!(FindPairs(&[], false, &d, &f, &[]).is_empty());
         }
 }

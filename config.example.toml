@@ -22,6 +22,10 @@ start_enabled = true
 # below are used first.
 match_by_name = true
 
+# Do not link the AFK voice channel of either server by name. A [[links]]
+# entry can still link an AFK channel. Default true.
+ignore_afk_channels = true
+
 # Nickname of a group bot: the main bot (or a proxy, when the main bot is
 # busy in another channel) when it speaks for all users of a channel,
 # because there are not enough proxies for each user.

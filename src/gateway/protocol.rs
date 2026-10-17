@@ -8,7 +8,7 @@
 // The field names of the payload types match the JSON keys of the gateway
 // protocol, because these types are data contracts with the servers.
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 
 // ============================================================================
@@ -105,9 +105,22 @@ pub struct VoiceStateData {
 pub struct GuildCreate {
         pub id: String,
         #[serde(default)]
+        pub afk_channel_id: Option<String>,
+        #[serde(default)]
         pub channels: Vec<ChannelData>,
         #[serde(default)]
         pub voice_states: Vec<VoiceStateData>,
+}
+
+// Discord names the guild key "id". Fluxer names it "guild_id".
+#[derive(Debug, Deserialize)]
+pub struct GuildUpdate {
+        #[serde(alias = "guild_id")]
+        pub id: String,
+        // None when the update does not include the key. Some(None) when
+        // the guild removed its AFK channel.
+        #[serde(default, deserialize_with = "ReadPresentValue")]
+        pub afk_channel_id: Option<Option<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -188,6 +201,14 @@ pub fn BuildVoiceState(guild_id: &str, channel_id: Option<&str>) -> String {
         json!({ "op": OP_VOICE_STATE_UPDATE, "d": data }).to_string()
 }
 
+// Tell a key that is missing (None, from the default) from a key that is
+// null (Some(None)).
+fn ReadPresentValue<'de, D: Deserializer<'de>>(
+        deserializer: D,
+) -> Result<Option<Option<String>>, D::Error> {
+        Option::<String>::deserialize(deserializer).map(Some)
+}
+
 // Read the payload of a frame as a specific type.
 pub fn ParseData<T: serde::de::DeserializeOwned>(data: &Value) -> Option<T> {
         T::deserialize(data).ok()
@@ -214,6 +235,17 @@ mod tests {
                                 .unwrap();
                 assert_eq!(v["op"], 4);
                 assert!(v["d"]["channel_id"].is_null());
+        }
+
+        #[test]
+        fn GuildUpdateTellsMissingFromNull() {
+                let missing: GuildUpdate =
+                        serde_json::from_str(r#"{"id":"g"}"#).unwrap();
+                assert_eq!(missing.afk_channel_id, None);
+                let text = r#"{"guild_id":"g","afk_channel_id":null}"#;
+                let removed: GuildUpdate = serde_json::from_str(text).unwrap();
+                assert_eq!(removed.id, "g");
+                assert_eq!(removed.afk_channel_id, Some(None));
         }
 
         #[test]
