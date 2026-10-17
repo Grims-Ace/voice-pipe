@@ -27,13 +27,32 @@ the bots relay voice in both directions.
 The bridge uses two types of bot on each platform:
 
 - **Main bot** (one for each platform). It watches the voice channels. The
-  Discord main bot also answers the chat commands. When no proxy is free,
-  the main bot joins voice with the nickname **Multiple Users** and speaks
-  for all the people that have no proxy.
+  Discord main bot also answers the chat commands. When there are not
+  enough proxies for all the people in a channel, the main bot joins voice
+  with the nickname **Multiple Users** and speaks for all of them.
 - **Proxy bots** (zero or more for each platform). A proxy copies the
   nickname and avatar of one person from the other platform and joins voice
   as that person. A proxy on Discord shows a Fluxer user. A proxy on Fluxer
   shows a Discord user.
+
+### Single proxies and group bots
+
+The mirrors in a channel work in one of two modes:
+
+- **Single proxies.** When there is a free proxy for each person, each
+  person gets their own proxy.
+- **Group bot.** When there are not enough proxies, one bot speaks for all
+  the people with the nickname **Multiple Users**. This is the main bot. If
+  the main bot is already a group bot in another link, a proxy becomes the
+  group bot. When a proxy of the channel is already in voice, it only
+  changes its name, so it does not leave and join again. When a group bot
+  is in voice, all the single proxies of that channel leave, so that other
+  links can use them.
+
+A channel goes back to single proxies when enough proxies are free for all
+of its people for 10 seconds. The new proxies join first, and the group bot
+leaves only after they are all in voice, so no speech is lost. A proxy that
+was the group bot stays in voice and becomes the proxy of the last person.
 
 ### Linked channels
 
@@ -47,7 +66,8 @@ joins together. The bridge finds links in two ways:
 
 The bridge can run many links at the same time. The proxy pool is shared
 between all links. The main bot can be in only one voice channel for each
-server, so only one link at a time can use it for overflow.
+server, so only one link at a time can use it as a group bot. Other links
+use a proxy as their group bot.
 
 ### Presence and audio
 
@@ -55,19 +75,20 @@ server, so only one link at a time can use it for overflow.
         Discord channel "General"            Fluxer channel "General"
         ─────────────────────────            ────────────────────────
         Alice (person)  ──── mirrored as ──▶ proxy "Alice"
-        proxy "Bob"     ◀── mirrored as ──── Bob (person)
-        Multiple Users  ◀── mirrored as ──── Carol, Dave (no free proxy)
+        Multiple Users  ◀── mirrored as ──── Bob, Carol, Dave
+                                             (not enough proxies)
 ```
 
 1. **One side has people.** For each person, the bridge puts a mirror in
    the linked channel on the other platform: a proxy with the person's
-   name and avatar, or the main bot as "Multiple Users". People on the
+   name and avatar, or one group bot as "Multiple Users". People on the
    other platform can see who is in the channel before they join. **No
    audio is received or sent in this state.**
 2. **Both sides have people.** On each side, one bridge bot becomes the
    *listener*. Only the listener receives audio. The bridge gives the audio
    of each speaker to the mirror of that speaker on the other platform.
-   Overflow speakers are mixed together and the main bot plays the mix.
+   For a group, the speakers are mixed together and the group bot plays
+   the mix.
 3. **A person leaves.** Their mirror leaves, and the proxy gets its idle
    nickname again (`Voice Pipe Proxy 1`, `Voice Pipe Proxy 2`, ...). When
    both channels are empty, the link stops and all of its bots leave.
@@ -226,7 +247,7 @@ Optional settings:
 | `general.command_prefix` | `vp!` | Prefix of the chat commands |
 | `general.start_enabled` | `true` | Start with the bridge on |
 | `general.match_by_name` | `true` | Link channels with the same name |
-| `general.overflow_name` | `Multiple Users` | Nickname of the overflow bot |
+| `general.overflow_name` | `Multiple Users` | Nickname of a group bot |
 | `general.proxy_idle_name` | `Voice Pipe Proxy {number}` | Nickname of a free proxy |
 | `general.voice_threshold` | `200` | Level below which audio is silence |
 | `general.silence_hangover_ms` | `300` | Send time after speech stops (minimum 20) |
@@ -304,13 +325,13 @@ Example status:
 voice-pipe status
 Bridge: on
 Discord proxies free: 1 of 2 · main bot: not in voice
-Fluxer proxies free: 0 of 2 (1 wait after a failure) · main bot: overflow in General
+Fluxer proxies free: 1 of 2 (1 wait after a failure) · main bot: group bot in General
 Active links: 1
 
 General · audio relay on
 Discord users: 3 · Fluxer users: 1
 In Discord: Bob
-In Fluxer: Alice, Multiple Users (2)
+In Fluxer: Multiple Users (3)
 Relayed speech: 41.2 s to Discord, 63.8 s to Fluxer
 ```
 
@@ -336,13 +357,14 @@ it.
 
 ## Limits
 
-- **One overflow channel for each platform.** The main bot can be in only
-  one voice channel for each server. If two links need overflow at the same
-  time, the second link has no overflow voice until the first one releases
-  the main bot. Add proxies to prevent this.
-- **One proxy for each person.** A link with 5 Fluxer users needs 5
-  Discord proxies for all of them to show by name. Users without a proxy
-  share the main bot.
+- **One main bot for each platform.** The main bot can be in only one
+  voice channel for each server. When two links need a group bot at the
+  same time, the second link uses a proxy as its group bot. If that link
+  has no proxy and no proxy is free, its people have no mirror until a bot
+  is free.
+- **One proxy for each person.** A link with 5 Fluxer users needs 5 free
+  Discord proxies for all of them to show by name. With fewer, all 5 share
+  one group bot.
 - **Rate limits.** Nicknames and avatars change through the API. The
   bridge copies an avatar only when a proxy gets a different person.
   Discord and Fluxer can still delay many quick changes.
@@ -370,9 +392,9 @@ src/
     coordinator.rs  Start and stop links, answer commands
     matching.rs     Find linked channel pairs
     link.rs         One link task: sync mirrors and relay audio
-    side.rs         Bots in one channel of a link: proxies, overflow, listener
+    side.rs         Bots in one channel of a link: proxies, group bot, listener
     proxy.rs        Proxy pool and proxy sessions (copy name and avatar)
-    overflow.rs     Mix overflow speakers for the main bot
+    overflow.rs     Mix the speakers of a group for the group bot
     status.rs       Link state and the status report
 ```
 

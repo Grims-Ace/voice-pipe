@@ -22,7 +22,9 @@ start_enabled = true
 # below are used first.
 match_by_name = true
 
-# Nickname of the main bot when it speaks for users that have no proxy.
+# Nickname of a group bot: the main bot (or a proxy, when the main bot is
+# busy in another channel) when it speaks for all users of a channel,
+# because there are not enough proxies for each user.
 overflow_name = "Multiple Users"
 
 # Nickname of a proxy while it mirrors nobody. {number} is the position of
@@ -53,7 +55,8 @@ jitter_frames = 3
 guild_id = ""
 
 # Token of the main bot. It watches the voice channels, answers the
-# commands, and joins voice as "Multiple Users" when no proxy is free.
+# commands, and joins voice as "Multiple Users" when there are not enough
+# proxies for all users in a channel.
 # It needs the Message Content intent (see README).
 main_token = ""
 

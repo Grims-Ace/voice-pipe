@@ -179,6 +179,11 @@ impl PlatformHub {
                 if slot.as_ref() == Some(key) { *slot = None; }
         }
 
+        // Return the number of proxies that are free to use now.
+        pub fn CountFreeProxies(&self) -> usize {
+                self._proxies.lock().unwrap().CountAvailable()
+        }
+
         pub fn AcquireProxy(&self) -> Option<ProxyAccount> {
                 self._proxies.lock().unwrap().Acquire()
         }

@@ -286,8 +286,8 @@ impl Link {
                                 self.Relay(platform, &speaker, frame)
                         }
                         Wake::Mix => {
-                                self._discord.SendOverflow();
-                                self._fluxer.SendOverflow();
+                                self._discord.SendGroupAudio();
+                                self._fluxer.SendGroupAudio();
                         }
                         Wake::Check => self.Check(),
                 }

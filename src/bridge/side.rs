@@ -1,8 +1,10 @@
 // ============================================================================
 // ============================================================================
 // Manage the bridge bots in one voice channel of a link. Each person on the
-// other platform gets a mirror here: a proxy that looks like them, or the main
-// bot as "multiple users" when no proxy is free.
+// other platform gets a mirror here. When there are enough proxies, each
+// person gets a proxy that looks like them. When there are not, one group bot
+// (the main bot, or a proxy when the main bot is busy) speaks for all of them,
+// and the single proxies leave so that other links can use them.
 // ============================================================================
 // ============================================================================
 
@@ -18,7 +20,7 @@ use tracing::{info, warn};
 use super::hub::{Hub, PlatformHub};
 use super::link::LinkKey;
 use super::overflow::OverflowMixer;
-use super::proxy::{ProxyAccount, ProxySession};
+use super::proxy::{ProxyAccount, ProxyLook, ProxySession};
 use super::status::SideStatus;
 use crate::audio::AudioFrame;
 use crate::platform::Platform;
@@ -32,6 +34,9 @@ use crate::voice::{SpeakerFrame, VoiceConnection, VoiceTarget};
 const MAIN_OPEN_TIMEOUT: Duration = Duration::from_secs(30);
 // Wait time after the main bot fails to join before it tries again.
 const MAIN_RETRY_DELAY: Duration = Duration::from_secs(30);
+// Time that enough proxies must be free before a group goes back to single
+// proxies, so that bots do not leave and join again and again.
+const SPLIT_DELAY: Duration = Duration::from_secs(10);
 
 // ============================================================================
 // Types
@@ -42,14 +47,21 @@ const MAIN_RETRY_DELAY: Duration = Duration::from_secs(30);
 // matter.
 #[allow(clippy::large_enum_variant)]
 pub enum SideEvent {
-        ProxyOpened(Platform, String, Result<ProxySession, ProxyAccount>),
+        ProxyOpened(Platform, ProxyLook, Result<ProxySession, ProxyAccount>),
         MainOpened(Platform, Option<VoiceConnection>),
+}
+
+// The bot that speaks for all users of the other platform.
+#[allow(clippy::large_enum_variant)]
+enum GroupBot {
+        Main(VoiceConnection),
+        Proxy(ProxySession),
 }
 
 // The bot that receives the audio of the people in this channel.
 #[derive(Clone, PartialEq, Eq)]
 enum Listener {
-        Main,
+        Group,
         Proxy(String),
 }
 
@@ -61,13 +73,16 @@ pub struct Side {
         _target: VoiceTarget,
         _proxies: HashMap<String, ProxySession>,
         _opening: HashSet<String>,
-        _overflowUsers: HashSet<String>,
-        _main: Option<VoiceConnection>,
+        _group: Option<GroupBot>,
+        _groupUsers: HashSet<String>,
         _isMainOpening: bool,
+        _isGroupProxyOpening: bool,
         _hasMainSlot: bool,
         _mainRetryAt: Option<Instant>,
+        _isSplitting: bool,
+        _splitReadySince: Option<Instant>,
         _listener: Option<Listener>,
-        _overflow: OverflowMixer,
+        _mixer: OverflowMixer,
         _events: mpsc::Sender<SideEvent>,
 }
 
@@ -80,6 +95,15 @@ impl SideEvent {
         }
 }
 
+impl GroupBot {
+        fn getVoice(&self) -> &VoiceConnection {
+                match self {
+                        GroupBot::Main(voice) => voice,
+                        GroupBot::Proxy(session) => session.getVoice(),
+                }
+        }
+}
+
 impl Side {
         // ====================================================================
         // Accessors and Constructor
@@ -87,23 +111,44 @@ impl Side {
 
         // Return true while a proxy or the main bot is still connecting.
         pub fn hasPendingOpens(&self) -> bool {
-                !self._opening.is_empty() || self._isMainOpening
+                !self._opening.is_empty() || self.isGroupOpening()
         }
 
         pub fn getStatus(&self) -> SideStatus {
                 let mut names: Vec<String> = self
                         ._proxies
                         .values()
-                        .map(|s| s.getNickname().to_string())
+                        .map(|s| s.getNickname())
                         .collect();
                 names.sort();
+                let group_opening = usize::from(self.isGroupOpening());
                 SideStatus::New(
                         self._platform,
                         names,
-                        self._opening.len(),
-                        self._overflowUsers.len(),
-                        self._main.is_some(),
+                        self._opening.len() + group_opening,
+                        self._groupUsers.len(),
+                        self._group.is_some(),
                 )
+        }
+
+        fn isGroupOpening(&self) -> bool {
+                self._isMainOpening || self._isGroupProxyOpening
+        }
+
+        // Return true while a group bot is in voice or connects.
+        fn isGroupActive(&self) -> bool {
+                self._group.is_some() || self.isGroupOpening()
+        }
+
+        // Return true if the user has a single proxy that is open or opens.
+        fn hasProxy(&self, user: &str) -> bool {
+                self._proxies.contains_key(user) || self._opening.contains(user)
+        }
+
+        // A group proxy stays in voice for the last user of a split, so
+        // that user needs no new proxy.
+        fn getSplitReserve(&self) -> usize {
+                usize::from(matches!(self._group, Some(GroupBot::Proxy(_))))
         }
 
         fn getPlatformHub(&self) -> &PlatformHub {
@@ -112,7 +157,9 @@ impl Side {
 
         fn getListenerVoice(&self) -> Option<&VoiceConnection> {
                 match self._listener.as_ref()? {
-                        Listener::Main => self._main.as_ref(),
+                        Listener::Group => {
+                                self._group.as_ref().map(|g| g.getVoice())
+                        }
                         Listener::Proxy(user) => {
                                 self._proxies.get(user).map(|s| s.getVoice())
                         }
@@ -146,13 +193,16 @@ impl Side {
                         _target: target,
                         _proxies: HashMap::new(),
                         _opening: HashSet::new(),
-                        _overflowUsers: HashSet::new(),
-                        _main: None,
+                        _group: None,
+                        _groupUsers: HashSet::new(),
                         _isMainOpening: false,
+                        _isGroupProxyOpening: false,
                         _hasMainSlot: false,
                         _mainRetryAt: None,
+                        _isSplitting: false,
+                        _splitReadySince: None,
                         _listener: None,
-                        _overflow: OverflowMixer::New(jitter),
+                        _mixer: OverflowMixer::New(jitter),
                         _events: events,
                 }
         }
@@ -165,30 +215,35 @@ impl Side {
         // linked channel on the other platform.
         pub fn Sync(&mut self, users: &HashSet<String>) {
                 self.RemoveDeparted(users);
-                self.OpenProxies(users);
-                self.UpdateOverflow(users);
+                if users.is_empty() {
+                        self.ReleaseGroup();
+                } else {
+                        if !self.isGroupActive() { self.SyncSingles(users); }
+                        if self.isGroupActive() { self.SyncGroup(users); }
+                }
+                self.UpdateGroupUsers(users);
         }
 
-        // Store the result of a background connection.
+        // Store the result of a background connection. The next Sync closes
+        // a single proxy that the group bot made unnecessary.
         pub fn HandleEvent(&mut self, event: SideEvent) {
                 match event {
-                        SideEvent::ProxyOpened(_, user, Ok(session)) => {
-                                self._opening.remove(&user);
-                                self._proxies.insert(user, session);
+                        SideEvent::ProxyOpened(_, look, Ok(session)) => {
+                                self.StoreProxy(look, session)
                         }
-                        SideEvent::ProxyOpened(_, user, Err(account)) => {
-                                self._opening.remove(&user);
+                        SideEvent::ProxyOpened(_, look, Err(account)) => {
+                                self.ForgetOpening(&look);
                                 self.getPlatformHub().HoldProxy(account);
                         }
                         SideEvent::MainOpened(_, Some(voice)) => {
                                 self._isMainOpening = false;
-                                self._main = Some(voice);
+                                self._group = Some(GroupBot::Main(voice));
                         }
                         SideEvent::MainOpened(_, None) => {
                                 self._isMainOpening = false;
                                 self._mainRetryAt =
                                         Some(Instant::now() + MAIN_RETRY_DELAY);
-                                self.ReleaseMain();
+                                self.ReleaseMain(None);
                         }
                 }
         }
@@ -208,19 +263,19 @@ impl Side {
                                 %user,
                                 "proxy lost its voice connection",
                         );
-                        if let Some(session) = self._proxies.remove(&user) {
-                                self.ReleaseProxy(session);
-                        }
+                        self.RemoveProxy(&user);
                 }
-                if self._main.as_ref().is_some_and(|v| !v.isConnected()) {
-                        warn!(
-                                platform = %self._platform,
-                                "main bot lost its voice connection",
-                        );
+                let Some(group) = &self._group else { return };
+                if group.getVoice().isConnected() { return; }
+                warn!(
+                        platform = %self._platform,
+                        "group bot lost its voice connection",
+                );
+                if matches!(group, GroupBot::Main(_)) {
                         self._mainRetryAt =
                                 Some(Instant::now() + MAIN_RETRY_DELAY);
-                        self.ReleaseMain();
                 }
+                self.ReleaseGroup();
         }
 
         // Disconnect all bots of this side and give back the proxies and the
@@ -233,9 +288,112 @@ impl Side {
                 for session in sessions {
                         tasks.push(self.SpawnProxyClose(session));
                 }
-                self._overflowUsers.clear();
-                if let Some(task) = self.ReleaseMain() { tasks.push(task); }
+                self._groupUsers.clear();
+                if let Some(task) = self.ReleaseGroup() { tasks.push(task); }
                 join_all(tasks).await;
+        }
+
+        // Record the users that the group bot speaks for. Without a group
+        // bot in voice, these are the users that have no mirror.
+        fn UpdateGroupUsers(&mut self, users: &HashSet<String>) {
+                let has_group = self._group.is_some();
+                self._groupUsers = users
+                        .iter()
+                        .filter(|u| {
+                                !self._proxies.contains_key(*u)
+                                        && (has_group
+                                                || !self._opening.contains(*u))
+                        })
+                        .cloned()
+                        .collect();
+        }
+
+        // ====================================================================
+        // Single Proxies
+        // ====================================================================
+
+        // Give each user a proxy. Start a group bot when proxies run out. Do
+        // not open proxies that the group bot would make leave at once.
+        fn SyncSingles(&mut self, users: &HashSet<String>) {
+                let lacking =
+                        users.iter().filter(|u| !self.hasProxy(u)).count();
+                let free = self.getPlatformHub().CountFreeProxies();
+                if lacking <= free && self.OpenProxies(users, 0) { return; }
+                self.StartGroup();
+        }
+
+        // Open a single proxy for each user that has none, but leave
+        // `reserve` users for the group proxy. Return false when no proxy
+        // was free for a user.
+        fn OpenProxies(
+                &mut self,
+                users: &HashSet<String>,
+                reserve: usize,
+        ) -> bool {
+                let mut lacking: Vec<String> = users
+                        .iter()
+                        .filter(|u| !self.hasProxy(u))
+                        .cloned()
+                        .collect();
+                lacking.sort();
+                for user in lacking.into_iter().skip(reserve) {
+                        let Some(account) =
+                                self.getPlatformHub().AcquireProxy()
+                        else {
+                                return false;
+                        };
+                        self.OpenProxy(ProxyLook::User(user), account);
+                }
+                true
+        }
+
+        // Start to connect a proxy in the background.
+        fn OpenProxy(&mut self, look: ProxyLook, account: ProxyAccount) {
+                match &look {
+                        ProxyLook::User(user) => {
+                                self._opening.insert(user.clone());
+                        }
+                        ProxyLook::Group => self._isGroupProxyOpening = true,
+                }
+                let (hub, platform, events) = (
+                        self._hub.clone(),
+                        self._platform,
+                        self._events.clone(),
+                );
+                let target = self._target.ForBot(account.getBotId());
+                tokio::spawn(async move {
+                        let result = ProxySession::Open(
+                                &hub, account, &target, platform, &look,
+                        )
+                        .await;
+                        let event =
+                                SideEvent::ProxyOpened(platform, look, result);
+                        if let Err(failed) = events.send(event).await {
+                                DiscardEvent(&hub, failed.0).await;
+                        }
+                });
+        }
+
+        // Keep a proxy that finished its connection.
+        fn StoreProxy(&mut self, look: ProxyLook, session: ProxySession) {
+                self.ForgetOpening(&look);
+                match look {
+                        ProxyLook::User(user) => {
+                                self._proxies.insert(user, session);
+                        }
+                        ProxyLook::Group => {
+                                self._group = Some(GroupBot::Proxy(session));
+                        }
+                }
+        }
+
+        fn ForgetOpening(&mut self, look: &ProxyLook) {
+                match look {
+                        ProxyLook::User(user) => {
+                                self._opening.remove(user);
+                        }
+                        ProxyLook::Group => self._isGroupProxyOpening = false,
+                }
         }
 
         // Close the proxies of users that left the linked channel.
@@ -252,51 +410,28 @@ impl Side {
                                 %user,
                                 "user left, proxy leaves",
                         );
-                        if let Some(session) = self._proxies.remove(&user) {
-                                self.ReleaseProxy(session);
-                        }
+                        self.RemoveProxy(&user);
                 }
         }
 
-        // Start a proxy for each user that has none, while proxies are free.
-        fn OpenProxies(&mut self, users: &HashSet<String>) {
-                for user in users {
-                        if self._proxies.contains_key(user)
-                                || self._opening.contains(user)
-                        {
-                                continue;
-                        }
-                        let Some(account) =
-                                self.getPlatformHub().AcquireProxy()
-                        else {
-                                return;
-                        };
-                        self.OpenProxy(user.clone(), account);
-                }
-        }
-
-        fn OpenProxy(&mut self, user: String, account: ProxyAccount) {
-                self._opening.insert(user.clone());
-                let (hub, platform, events) = (
-                        self._hub.clone(),
-                        self._platform,
-                        self._events.clone(),
+        // Close all single proxies, because the group bot speaks for their
+        // users now.
+        fn CloseSingles(&mut self) {
+                if self._proxies.is_empty() { return; }
+                info!(
+                        platform = %self._platform,
+                        count = self._proxies.len(),
+                        "group bot is in voice, single proxies leave",
                 );
-                let target = self._target.ForBot(account.getBotId());
-                tokio::spawn(async move {
-                        let result = ProxySession::Open(
-                                &hub, account, &target, platform, &user,
-                        )
-                        .await;
-                        let event =
-                                SideEvent::ProxyOpened(platform, user, result);
-                        if let Err(failed) = events.send(event).await {
-                                DiscardEvent(&hub, failed.0).await;
-                        }
-                });
+                let users: Vec<String> =
+                        self._proxies.keys().cloned().collect();
+                for user in users { self.RemoveProxy(&user); }
         }
 
-        fn ReleaseProxy(&mut self, session: ProxySession) {
+        // Close the single proxy of a user and give it back to the pool.
+        fn RemoveProxy(&mut self, user: &str) {
+                self.StopListeningTo(&Listener::Proxy(user.to_string()));
+                let Some(session) = self._proxies.remove(user) else { return };
                 self.SpawnProxyClose(session);
         }
 
@@ -309,38 +444,51 @@ impl Side {
                 })
         }
 
-        // ====================================================================
-        // Main Bot (Overflow)
-        // ====================================================================
-
-        // Users without a proxy go to the main bot. Bring the main bot in
-        // when it has users, and take it out when it has none.
-        fn UpdateOverflow(&mut self, users: &HashSet<String>) {
-                self._overflowUsers = users
-                        .iter()
-                        .filter(|u| {
-                                !self._proxies.contains_key(*u)
-                                        && !self._opening.contains(*u)
-                        })
-                        .cloned()
-                        .collect();
-                if self._overflowUsers.is_empty() {
-                        self.ReleaseMain();
-                        return;
-                }
-                self.OpenMainIfFree();
+        // Change the look of a proxy that is in voice, in the background.
+        fn SpawnLookChange(&self, session: &ProxySession, look: ProxyLook) {
+                let (hub, platform) = (self._hub.clone(), self._platform);
+                let profile = session.getProfile();
+                tokio::spawn(async move {
+                        profile.Apply(&hub, platform, &look).await;
+                });
         }
 
-        fn OpenMainIfFree(&mut self) {
-                if self._main.is_some() || self._isMainOpening { return; }
-                if self._mainRetryAt.is_some_and(|at| Instant::now() < at) {
+        // ====================================================================
+        // Group Bot
+        // ====================================================================
+
+        // Start a bot that speaks for all users: the main bot if it is
+        // free, else a proxy that is in this channel, else a free proxy.
+        fn StartGroup(&mut self) {
+                if self.TryOpenMain() || self.TryPromoteProxy() { return; }
+                if let Some(account) = self.getPlatformHub().AcquireProxy() {
+                        self.OpenProxy(ProxyLook::Group, account);
+                }
+        }
+
+        // Keep one bot for all users. When it is in voice, close the single
+        // proxies, or go back to single proxies when enough are free.
+        fn SyncGroup(&mut self, users: &HashSet<String>) {
+                if self._group.is_none() { return; }
+                if self._isSplitting {
+                        self.ContinueSplit(users);
                         return;
+                }
+                self.CloseSingles();
+                if self.CheckSplitReady(users) { self.StartSplit(users); }
+        }
+
+        // Start the main bot as the group bot. Return false if the main bot
+        // is busy in another link or must wait after a failure.
+        fn TryOpenMain(&mut self) -> bool {
+                if self._mainRetryAt.is_some_and(|at| Instant::now() < at) {
+                        return false;
                 }
                 if !self._hasMainSlot {
                         self._hasMainSlot =
                                 self.getPlatformHub().ClaimMain(&self._key);
                 }
-                if !self._hasMainSlot { return; }
+                if !self._hasMainSlot { return false; }
                 self._isMainOpening = true;
                 let (hub, platform, events) = (
                         self._hub.clone(),
@@ -355,17 +503,58 @@ impl Side {
                                 DiscardEvent(&hub, failed.0).await;
                         }
                 });
+                true
+        }
+
+        // Make a single proxy of this channel the group bot. It is already
+        // in voice, so it only changes its name and avatar.
+        fn TryPromoteProxy(&mut self) -> bool {
+                let Some(user) = self
+                        ._proxies
+                        .iter()
+                        .find(|(_, s)| s.getVoice().isConnected())
+                        .map(|(user, _)| user.clone())
+                else {
+                        return false;
+                };
+                self.StopListeningTo(&Listener::Proxy(user.clone()));
+                let Some(session) = self._proxies.remove(&user) else {
+                        return false;
+                };
+                info!(
+                        platform = %self._platform,
+                        %user,
+                        "main bot is busy, a proxy speaks for the group",
+                );
+                self.SpawnLookChange(&session, ProxyLook::Group);
+                self._group = Some(GroupBot::Proxy(session));
+                true
+        }
+
+        // Take the group bot out of voice. Return the task that closes it.
+        fn ReleaseGroup(&mut self) -> Option<JoinHandle<()>> {
+                self.StopListeningTo(&Listener::Group);
+                self._mixer.Clear();
+                self._isSplitting = false;
+                self._splitReadySince = None;
+                match self._group.take() {
+                        Some(GroupBot::Proxy(session)) => {
+                                Some(self.SpawnProxyClose(session))
+                        }
+                        Some(GroupBot::Main(voice)) => {
+                                self.ReleaseMain(Some(voice))
+                        }
+                        None => self.ReleaseMain(None),
+                }
         }
 
         // Take the main bot out of voice and free it for other links. The
         // slot stays reserved until the bot has left, so that a new join on
         // the same gateway cannot cross the leave.
-        fn ReleaseMain(&mut self) -> Option<JoinHandle<()>> {
-                if self._listener == Some(Listener::Main) {
-                        self._listener = None;
-                }
-                self._overflow.Clear();
-                let voice = self._main.take();
+        fn ReleaseMain(
+                &mut self,
+                voice: Option<VoiceConnection>,
+        ) -> Option<JoinHandle<()>> {
                 if !self._hasMainSlot || self._isMainOpening { return None; }
                 self._hasMainSlot = false;
                 let (hub, platform, key) =
@@ -379,6 +568,86 @@ impl Side {
         }
 
         // ====================================================================
+        // Split (Group Back to Single Proxies)
+        // ====================================================================
+
+        // Return true when enough proxies were free for the full split
+        // delay.
+        fn CheckSplitReady(&mut self, users: &HashSet<String>) -> bool {
+                let needed = users.len().saturating_sub(self.getSplitReserve());
+                let free = self.getPlatformHub().CountFreeProxies();
+                if free < needed {
+                        self._splitReadySince = None;
+                        return false;
+                }
+                let since =
+                        *self._splitReadySince.get_or_insert_with(Instant::now);
+                since.elapsed() >= SPLIT_DELAY
+        }
+
+        fn StartSplit(&mut self, users: &HashSet<String>) {
+                info!(
+                        platform = %self._platform,
+                        "proxies are free, group goes back to single proxies",
+                );
+                self._isSplitting = true;
+                self._splitReadySince = None;
+                self.ContinueSplit(users);
+        }
+
+        // Open single proxies for the users of the group. The group bot
+        // speaks for each user until the proxy of that user is in voice.
+        fn ContinueSplit(&mut self, users: &HashSet<String>) {
+                let reserve = self.getSplitReserve();
+                if !self.OpenProxies(users, reserve) {
+                        self.StopSplit();
+                        return;
+                }
+                let waiting = users
+                        .iter()
+                        .filter(|u| !self._proxies.contains_key(*u))
+                        .count();
+                if !self._opening.is_empty() || waiting > reserve { return; }
+                self.FinishSplit(users);
+        }
+
+        // Stop a split when other links took the free proxies.
+        fn StopSplit(&mut self) {
+                info!(
+                        platform = %self._platform,
+                        "not enough proxies, the group bot stays",
+                );
+                self._isSplitting = false;
+                self.CloseSingles();
+        }
+
+        // Let the main bot leave, or give the group proxy to the last user
+        // that has no single proxy.
+        fn FinishSplit(&mut self, users: &HashSet<String>) {
+                self._isSplitting = false;
+                let keeper = users
+                        .iter()
+                        .find(|u| !self._proxies.contains_key(*u))
+                        .cloned();
+                info!(platform = %self._platform, "group split finished");
+                if !matches!(self._group, Some(GroupBot::Proxy(_))) {
+                        self.ReleaseGroup();
+                        return;
+                }
+                self.StopListeningTo(&Listener::Group);
+                self._mixer.Clear();
+                let Some(GroupBot::Proxy(session)) = self._group.take() else {
+                        return;
+                };
+                let Some(user) = keeper else {
+                        self.SpawnProxyClose(session);
+                        return;
+                };
+                self.SpawnLookChange(&session, ProxyLook::User(user.clone()));
+                self._proxies.insert(user, session);
+        }
+
+        // ====================================================================
         // Audio
         // ====================================================================
 
@@ -389,20 +658,21 @@ impl Side {
                         session.getVoice().SendFrame(frame);
                         return true;
                 }
-                if self._main.is_none()
-                        || !self._overflowUsers.contains(speaker)
+                if self._group.is_none() || !self._groupUsers.contains(speaker)
                 {
                         return false;
                 }
-                self._overflow.Push(speaker, frame);
+                self._mixer.Push(speaker, frame);
                 true
         }
 
-        // Send one mixed overflow frame through the main bot.
-        pub fn SendOverflow(&mut self) {
-                if self._overflow.isEmpty() { return; }
-                let Some(frame) = self._overflow.Pull() else { return };
-                if let Some(main) = &self._main { main.SendFrame(frame); }
+        // Send one mixed frame of the group users through the group bot.
+        pub fn SendGroupAudio(&mut self) {
+                if self._mixer.isEmpty() { return; }
+                let Some(frame) = self._mixer.Pull() else { return };
+                if let Some(group) = &self._group {
+                        group.getVoice().SendFrame(frame);
+                }
         }
 
         // Make one bot listen while audio is active, and none while it is
@@ -429,9 +699,18 @@ impl Side {
                 self._listener = None;
         }
 
+        // Stop the listener if it is `listener`, because its bot leaves or
+        // changes its role.
+        fn StopListeningTo(&mut self, listener: &Listener) {
+                if self._listener.as_ref() == Some(listener) {
+                        self.StopListening();
+                }
+        }
+
         fn ChooseListener(&self) -> Option<Listener> {
-                if self._main.as_ref().is_some_and(|v| v.isConnected()) {
-                        return Some(Listener::Main);
+                let group = self._group.as_ref();
+                if group.is_some_and(|g| g.getVoice().isConnected()) {
+                        return Some(Listener::Group);
                 }
                 self._proxies
                         .iter()
@@ -444,7 +723,7 @@ impl Side {
 // Helper Functions
 // ============================================================================
 
-// Name the main bot for overflow and join it to the channel.
+// Give the main bot the group name and join it to the channel.
 async fn OpenMain(
         hub: &Hub,
         platform: Platform,
@@ -462,7 +741,7 @@ async fn OpenMain(
         let join = VoiceConnection::Join(side.getGateway(), target);
         match tokio::time::timeout(MAIN_OPEN_TIMEOUT, join).await {
                 Ok(Ok(voice)) => {
-                        info!(%platform, "main bot joined voice for overflow");
+                        info!(%platform, "main bot joined voice for a group");
                         Some(voice)
                 }
                 Ok(Err(e)) => {
@@ -481,7 +760,7 @@ async fn OpenMain(
         }
 }
 
-// Take the main bot out of voice and remove its overflow nickname.
+// Take the main bot out of voice and remove its group nickname.
 async fn CloseMain(hub: &Hub, platform: Platform, voice: VoiceConnection) {
         let side = hub.getPlatform(platform);
         voice.Close().await;

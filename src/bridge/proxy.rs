@@ -1,11 +1,12 @@
 // ============================================================================
 // ============================================================================
 // Manage proxy bots: the pool of free accounts, and a proxy session that
-// copies the name and avatar of one user and joins voice as that user.
+// joins voice as one user of the other platform, or as a group of users.
 // ============================================================================
 // ============================================================================
 
 use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -32,14 +33,38 @@ const HOLD_TIME: Duration = Duration::from_secs(60);
 // Types
 // ============================================================================
 
-// A proxy bot account. It remembers whose avatar it has, because avatar
-// changes are slow and have strict rate limits.
+// What a proxy shows in the channel: one user of the other platform, or the
+// group name when it speaks for many users.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProxyLook {
+        User(String),
+        Group,
+}
+
+// The avatar that a proxy has now. Avatar changes are slow and have strict
+// rate limits, so a proxy changes its avatar only when it must.
+#[derive(Clone, PartialEq, Eq)]
+enum AvatarState {
+        Unknown,
+        Removed,
+        User(String),
+}
+
+// The name and avatar of a proxy bot. Clones share the same state, so that
+// a background task can change the look of a proxy that is in voice.
+#[derive(Clone)]
+pub struct ProxyProfile {
+        _rest: RestClient,
+        _botId: String,
+        _nickname: Arc<Mutex<String>>,
+        _avatar: Arc<Mutex<AvatarState>>,
+}
+
+// A proxy bot account.
 pub struct ProxyAccount {
         _token: String,
-        _botId: String,
-        _rest: RestClient,
         _idleName: Option<String>,
-        _avatarUserId: Option<String>,
+        _profile: ProxyProfile,
 }
 
 // The proxy accounts of one platform that are not in use.
@@ -50,13 +75,101 @@ pub struct ProxyPool {
 }
 
 // A proxy bot in a voice channel that looks like a user of the other
-// platform.
+// platform, or like the group of users that it speaks for.
 pub struct ProxySession {
         _account: ProxyAccount,
         _gateway: Gateway,
         _voice: VoiceConnection,
         _guildId: String,
-        _nickname: String,
+}
+
+// ============================================================================
+// Proxy Profile
+// ============================================================================
+
+impl ProxyProfile {
+        pub fn getNickname(&self) -> String {
+                self._nickname.lock().unwrap().clone()
+        }
+
+        fn New(rest: RestClient, bot_id: &str) -> Self {
+                Self {
+                        _rest: rest,
+                        _botId: bot_id.to_string(),
+                        _nickname: Arc::new(Mutex::new(String::new())),
+                        _avatar: Arc::new(Mutex::new(AvatarState::Unknown)),
+                }
+        }
+
+        // Change the name and avatar of the proxy to `look`. Errors only
+        // cause warnings, because a proxy with the wrong look still relays
+        // audio.
+        pub async fn Apply(
+                &self,
+                hub: &Hub,
+                platform: Platform,
+                look: &ProxyLook,
+        ) {
+                match look {
+                        ProxyLook::User(user) => {
+                                self.CopyUser(hub, platform, user).await
+                        }
+                        ProxyLook::Group => self.ShowGroup(hub, platform).await,
+                }
+        }
+
+        // Copy the name and avatar of a user from the other platform.
+        async fn CopyUser(
+                &self,
+                hub: &Hub,
+                platform: Platform,
+                user_id: &str,
+        ) {
+                let source = hub.getPlatform(platform.getOpposite());
+                let guild_id = hub.getPlatform(platform).getGuildId();
+                let profile = FetchUserProfile(hub, platform, user_id).await;
+                let fallback = platform.getOpposite().getTitle();
+                let nickname = profile
+                        .as_ref()
+                        .map(|p| p.getName().to_string())
+                        .unwrap_or_else(|| format!("{fallback} User"));
+                self.SetNickname(guild_id, &nickname).await;
+                // Without a profile the avatar is not known, so keep the old
+                // one and try again on the next change.
+                let Some(profile) = profile else { return };
+                let wanted = AvatarState::User(user_id.to_string());
+                if *self._avatar.lock().unwrap() == wanted { return; }
+                let (source, proxy) = (source.getRest(), &self._rest);
+                if CopyAvatar(source, proxy, guild_id, &profile).await {
+                        *self._avatar.lock().unwrap() = wanted;
+                }
+        }
+
+        // Show the group name and remove the avatar of the last user.
+        async fn ShowGroup(&self, hub: &Hub, platform: Platform) {
+                let guild_id = hub.getPlatform(platform).getGuildId();
+                let name = hub.getConfig().getGeneral().getOverflowName();
+                self.SetNickname(guild_id, &Truncate(name, NICKNAME_MAX)).await;
+                if *self._avatar.lock().unwrap() == AvatarState::Removed {
+                        return;
+                }
+                let Err(e) = self._rest.SetAvatar(guild_id, None).await else {
+                        *self._avatar.lock().unwrap() = AvatarState::Removed;
+                        return;
+                };
+                warn!(bot = %self._botId, error = %e, "cannot remove avatar");
+        }
+
+        // Set the nickname in the guild and remember it for the status.
+        async fn SetNickname(&self, guild_id: &str, nickname: &str) {
+                *self._nickname.lock().unwrap() = nickname.to_string();
+                let (rest, bot) = (&self._rest, &self._botId);
+                let result =
+                        rest.SetNickname(guild_id, bot, Some(nickname)).await;
+                if let Err(e) = result {
+                        warn!(bot = %bot, error = %e, "cannot set nickname");
+                }
+        }
 }
 
 // ============================================================================
@@ -64,7 +177,7 @@ pub struct ProxySession {
 // ============================================================================
 
 impl ProxyAccount {
-        pub fn getBotId(&self) -> &str { &self._botId }
+        pub fn getBotId(&self) -> &str { &self._profile._botId }
 
         // `idle_name` is the nickname of the proxy while it mirrors nobody.
         pub fn New(
@@ -75,26 +188,20 @@ impl ProxyAccount {
         ) -> Self {
                 Self {
                         _token: token.to_string(),
-                        _botId: bot_id.to_string(),
-                        _rest: rest,
                         _idleName: idle_name
                                 .map(|n| Truncate(&n, NICKNAME_MAX)),
-                        _avatarUserId: None,
+                        _profile: ProxyProfile::New(rest, bot_id),
                 }
         }
 
         // Set the idle nickname, so that a free proxy does not keep the
-        // name of the last person that it mirrored.
+        // name of the last person or group that it mirrored.
         pub async fn SetIdleName(&self, guild_id: &str) {
                 let name = self._idleName.as_deref();
-                let (rest, bot) = (&self._rest, &self._botId);
+                let (rest, bot) = (&self._profile._rest, self.getBotId());
                 let result = rest.SetNickname(guild_id, bot, name).await;
                 if let Err(e) = result {
-                        warn!(
-                                bot = %self._botId,
-                                error = %e,
-                                "cannot set idle name",
-                        );
+                        warn!(bot = %bot, error = %e, "cannot set idle name");
                 }
         }
 }
@@ -120,6 +227,12 @@ impl ProxyPool {
         pub fn Acquire(&mut self) -> Option<ProxyAccount> {
                 self.ReleaseHeld();
                 self._free.pop_front()
+        }
+
+        // Return the number of accounts that Acquire can give out now.
+        pub fn CountAvailable(&mut self) -> usize {
+                self.ReleaseHeld();
+                self._free.len()
         }
 
         pub fn Release(&mut self, account: ProxyAccount) {
@@ -149,55 +262,56 @@ impl ProxyPool {
 // ============================================================================
 
 impl ProxySession {
-        pub fn getNickname(&self) -> &str { &self._nickname }
+        pub fn getNickname(&self) -> String {
+                self._account._profile.getNickname()
+        }
+        pub fn getProfile(&self) -> ProxyProfile {
+                self._account._profile.clone()
+        }
         pub fn getVoice(&self) -> &VoiceConnection { &self._voice }
 
-        // Copy the name and avatar of `user_id` to the proxy, log it in, and
-        // join the channel of `target`. Give the account back on failure.
+        // Give the proxy the look of `look`, log it in, and join the channel
+        // of `target`. Give the account back on failure.
         #[allow(clippy::result_large_err)]
         pub async fn Open(
                 hub: &Hub,
-                mut account: ProxyAccount,
+                account: ProxyAccount,
                 target: &VoiceTarget,
                 platform: Platform,
-                user_id: &str,
+                look: &ProxyLook,
         ) -> Result<ProxySession, ProxyAccount> {
-                let nickname =
-                        CopyProfile(hub, &mut account, platform, user_id).await;
+                account._profile.Apply(hub, platform, look).await;
                 let side = hub.getPlatform(platform);
-                let label = format!("{platform} proxy {}", account._botId);
+                let bot_id = account.getBotId();
+                let label = format!("{platform} proxy {bot_id}");
                 let gateway = Gateway::Connect(side.BuildGatewaySettings(
                         &label,
                         &account._token,
-                        &account._botId,
+                        bot_id,
                         PROXY_INTENTS,
                 ));
                 let join = JoinVoice(&gateway, side.getGuildId(), target);
-                match tokio::time::timeout(OPEN_TIMEOUT, join).await {
+                let joined = tokio::time::timeout(OPEN_TIMEOUT, join).await;
+                let error = match joined {
                         Ok(Ok(voice)) => {
+                                let nickname = account._profile.getNickname();
                                 info!(
                                         %platform,
-                                        user = %user_id,
+                                        ?look,
                                         %nickname,
                                         "proxy joined voice",
                                 );
-                                Ok(ProxySession {
+                                return Ok(ProxySession {
                                         _account: account,
                                         _gateway: gateway,
                                         _voice: voice,
                                         _guildId: side.getGuildId().to_string(),
-                                        _nickname: nickname,
-                                })
+                                });
                         }
-                        Ok(Err(e)) => {
-                                Err(Fail(account, gateway, &format!("{e:#}"))
-                                        .await)
-                        }
-                        Err(_) => {
-                                Err(Fail(account, gateway, "join timed out")
-                                        .await)
-                        }
-                }
+                        Ok(Err(e)) => format!("{e:#}"),
+                        Err(_) => "join timed out".to_string(),
+                };
+                Err(Fail(account, gateway, &error).await)
         }
 
         // Leave voice, log out, and set the idle name. Return the account
@@ -229,27 +343,21 @@ async fn Fail(
         gateway: Gateway,
         reason: &str,
 ) -> ProxyAccount {
-        warn!(bot = %account._botId, %reason, "proxy could not join voice");
+        let bot = account.getBotId();
+        warn!(bot = %bot, %reason, "proxy could not join voice");
         gateway.Close().await;
         account
 }
 
-// Copy the name and avatar of a user from the other platform to the proxy.
-// Return the nickname. Errors only cause warnings, because a proxy with the
-// wrong name still relays audio.
-async fn CopyProfile(
+// Read the profile of a user on the other platform. Return None on failure.
+async fn FetchUserProfile(
         hub: &Hub,
-        account: &mut ProxyAccount,
         platform: Platform,
         user_id: &str,
-) -> String {
+) -> Option<UserProfile> {
         let source = hub.getPlatform(platform.getOpposite());
-        let guild_id = hub.getPlatform(platform).getGuildId();
-        let profile = match source
-                .getRest()
-                .FetchProfile(source.getGuildId(), user_id)
-                .await
-        {
+        let rest = source.getRest();
+        match rest.FetchProfile(source.getGuildId(), user_id).await {
                 Ok(profile) => Some(profile),
                 Err(e) => {
                         warn!(
@@ -259,35 +367,7 @@ async fn CopyProfile(
                         );
                         None
                 }
-        };
-        let nickname = profile
-                .as_ref()
-                .map(|p| p.getName().to_string())
-                .unwrap_or_else(|| {
-                        format!("{} User", platform.getOpposite().getTitle())
-                });
-        if let Err(e) = account
-                ._rest
-                .SetNickname(guild_id, &account._botId, Some(&nickname))
-                .await
-        {
-                warn!(
-                        bot = %account._botId,
-                        error = %e,
-                        "cannot set proxy nickname",
-                );
         }
-        // Without a profile the avatar is not known, so keep the old one
-        // and try again on the next open.
-        let Some(profile) = profile else { return nickname };
-        if account._avatarUserId.as_deref() == Some(user_id) {
-                return nickname;
-        }
-        let source = source.getRest();
-        if CopyAvatar(source, &account._rest, guild_id, &profile).await {
-                account._avatarUserId = Some(user_id.to_string());
-        }
-        nickname
 }
 
 // Set the guild avatar of the proxy to the avatar of the user, or remove it

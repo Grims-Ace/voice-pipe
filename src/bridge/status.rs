@@ -21,8 +21,8 @@ pub struct SideStatus {
         _platform: Platform,
         _proxyNames: Vec<String>,
         _openingCount: usize,
-        _overflowCount: usize,
-        _isMainPresent: bool,
+        _groupCount: usize,
+        _hasGroupBot: bool,
 }
 
 // The state of one link at the last update.
@@ -48,15 +48,15 @@ impl SideStatus {
                 platform: Platform,
                 proxy_names: Vec<String>,
                 opening_count: usize,
-                overflow_count: usize,
-                is_main_present: bool,
+                group_count: usize,
+                has_group_bot: bool,
         ) -> Self {
                 Self {
                         _platform: platform,
                         _proxyNames: proxy_names,
                         _openingCount: opening_count,
-                        _overflowCount: overflow_count,
-                        _isMainPresent: is_main_present,
+                        _groupCount: group_count,
+                        _hasGroupBot: has_group_bot,
                 }
         }
 
@@ -66,16 +66,16 @@ impl SideStatus {
                 if self._openingCount > 0 {
                         parts.push(format!("{} joining", self._openingCount));
                 }
-                if self._overflowCount > 0 && self._isMainPresent {
+                if self._groupCount > 0 && self._hasGroupBot {
                         parts.push(format!(
                                 "{overflow_name} ({})",
-                                self._overflowCount
+                                self._groupCount
                         ));
                 }
-                if self._overflowCount > 0 && !self._isMainPresent {
+                if self._groupCount > 0 && !self._hasGroupBot {
                         parts.push(format!(
                                 "{} without a mirror",
-                                self._overflowCount
+                                self._groupCount
                         ));
                 }
                 if parts.is_empty() { parts.push("nobody".into()); }
@@ -206,7 +206,7 @@ fn FormatPlatform(
                                 .iter()
                                 .find(|l| *l.getKey() == key)
                                 .map_or("a link", |l| l.getName());
-                        format!("overflow in {name}")
+                        format!("group bot in {name}")
                 }
                 None => "not in voice".to_string(),
         };
