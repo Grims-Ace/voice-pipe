@@ -39,10 +39,6 @@ proxy_idle_name = "Voice Pipe Proxy {number}"
 # "info,voice_pipe=debug". The RUST_LOG variable replaces this value.
 log_level = "info"
 
-# Frame level (RMS, 0 to 32768) below which audio is silence. Silence is not
-# sent. Make it higher if background noise opens the relay. Default 200.
-voice_threshold = 200
-
 # Time (ms) that a bot keeps sending after speech stops, so that the ends of
 # words are not cut. Default 300.
 silence_hangover_ms = 300

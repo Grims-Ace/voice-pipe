@@ -100,7 +100,8 @@ use a proxy as their group bot.
 - Bots do not decode or subscribe to audio until people are in both
   channels. On Discord the voice driver does not decrypt or decode. On
   Fluxer the bot does not subscribe to any audio track.
-- Audio Inputs with a level below `voice_threshold` are silence and are not sent.
+- Frames of digital silence are not sent. All other audio is sent, so that
+  quiet sounds inside speech are not cut out.
 - A mirror sends audio only while its person speaks, plus a short
   `silence_hangover_ms`, so that the ends of words are not cut. Then the
   Discord track pauses and the Fluxer track goes idle (Opus DTX).
@@ -252,7 +253,6 @@ Optional settings:
 | `general.ignore_afk_channels` | `true` | Do not link AFK channels by name |
 | `general.overflow_name` | `Multiple Users` | Nickname of a group bot |
 | `general.proxy_idle_name` | `Voice Pipe Proxy {number}` | Nickname of a free proxy |
-| `general.voice_threshold` | `200` | Level below which audio is silence |
 | `general.silence_hangover_ms` | `300` | Send time after speech stops (minimum 20) |
 | `general.jitter_frames` | `3` | Overflow mixer buffer (20 ms frames) |
 | `discord.command_role_ids` | `[]` | Roles that can toggle (empty = all, with a warning at start) |
@@ -354,7 +354,7 @@ it.
 | Proxy joins but has the wrong name | The bot needs the Change Nickname permission. |
 | Fluxer avatar does not copy | Check `avatar_url` against the avatar URLs of the Fluxer web app. |
 | Fluxer voice connects, no audio | See item 4 in [Network setup](#network-setup). |
-| Background noise relays | Make `voice_threshold` higher. |
+| Background noise relays | Ask the person to use push-to-talk or the noise suppression of their app. |
 | Ends of words are cut | Make `silence_hangover_ms` higher. |
 | Channels do not link | The names must be the same on both platforms, or add a `[[links]]` entry. |
 

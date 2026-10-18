@@ -64,7 +64,6 @@ struct VoiceReceiver {
         _ownBotIds: Arc<HashSet<String>>,
         _isListening: Arc<AtomicBool>,
         _heard: mpsc::Sender<SpeakerFrame>,
-        _voiceThreshold: f32,
 }
 
 // Keeps the connection flag equal to the state of the Songbird driver.
@@ -173,7 +172,7 @@ impl EventHandler for VoiceReceiver {
 
 impl VoiceReceiver {
         // Give one speaker's frame to the bridge. Skip unknown streams, bridge
-        // bots, and frames that are below the voice threshold.
+        // bots, and frames that are digital silence.
         fn Forward(
                 &self,
                 users: &HashMap<u32, String>,
@@ -184,7 +183,7 @@ impl VoiceReceiver {
                 if self._ownBotIds.contains(user) { return; }
                 let Some(pcm) = &data.decoded_voice else { return };
                 let frame = AudioFrame::FromDecoded(pcm);
-                if frame.isQuiet(self._voiceThreshold) { return; }
+                if frame.isSilent() { return; }
                 let _ = self._heard.try_send((user.clone(), frame));
         }
 }
@@ -336,7 +335,6 @@ fn AddReceiveEvents(
                 _ownBotIds: target.getOwnBotIds(),
                 _isListening: is_listening,
                 _heard: target.getHeard(),
-                _voiceThreshold: target.getTuning().getVoiceThreshold(),
         };
         driver.add_global_event(Event::Core(CoreEvent::VoiceTick), receiver);
 }

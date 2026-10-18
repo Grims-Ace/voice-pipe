@@ -55,8 +55,11 @@ fn main() -> Result<()> {
 // Load the config, start logging, and run the bridge until shutdown.
 fn Run() -> Result<()> {
         let path = FindConfigPath()?;
-        let config = Config::Load(&path)?;
+        // Start logging before the config is validated, so that the
+        // validation warnings are visible.
+        let mut config = Config::Read(&path)?;
         StartLogging(config.getGeneral().getLogLevel());
+        config.Prepare()?;
         info!(path = %path.display(), "config loaded");
         // Two TLS libraries are in the build, so rustls cannot select a
         // crypto provider without help.

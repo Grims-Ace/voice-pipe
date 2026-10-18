@@ -227,10 +227,7 @@ impl Hub {
                 )?;
                 let general = config.getGeneral();
                 Ok(Arc::new(Hub {
-                        _tuning: AudioTuning::New(
-                                general.getVoiceThreshold(),
-                                general.getSilenceHangover(),
-                        ),
+                        _tuning: AudioTuning::New(general.getSilenceHangover()),
                         _isEnabled: AtomicBool::new(general.isStartEnabled()),
                         _config: config,
                         _discord: discord,

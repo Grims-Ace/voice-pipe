@@ -47,11 +47,6 @@ impl AudioFrame {
 
         pub fn isSilent(&self) -> bool { self._samples.iter().all(|&s| s == 0) }
 
-        // Return true when the level is below the voice threshold.
-        pub fn isQuiet(&self, threshold: f32) -> bool {
-                self.getLevel() < threshold
-        }
-
         pub fn Silence() -> Self { Self { _samples: [0; FRAME_LEN] } }
 
         pub fn FromArray(samples: [i16; FRAME_LEN]) -> Self {
@@ -130,10 +125,8 @@ mod tests {
         }
 
         #[test]
-        fn QuietFrameIsBelowThreshold() {
-                let quiet = AudioFrame::FromStereo(&[10; FRAME_LEN]);
-                let loud = AudioFrame::FromStereo(&[3000; FRAME_LEN]);
-                assert!(quiet.isQuiet(100.0));
-                assert!(!loud.isQuiet(100.0));
+        fn OnlyZeroFramesAreSilent() {
+                assert!(AudioFrame::Silence().isSilent());
+                assert!(!AudioFrame::FromStereo(&[1; FRAME_LEN]).isSilent());
         }
 }

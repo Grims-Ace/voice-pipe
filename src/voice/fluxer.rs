@@ -57,7 +57,6 @@ struct ReceiveState {
         _isListening: AtomicBool,
         _ownBotIds: Arc<HashSet<String>>,
         _heard: mpsc::Sender<SpeakerFrame>,
-        _voiceThreshold: f32,
 }
 
 // ============================================================================
@@ -155,13 +154,13 @@ impl ReceiveState {
                         _isListening: AtomicBool::new(false),
                         _ownBotIds: target.getOwnBotIds(),
                         _heard: target.getHeard(),
-                        _voiceThreshold: target.getTuning().getVoiceThreshold(),
                 }
         }
 
-        // Give a frame to the bridge if it is louder than the voice threshold.
+        // Give a frame to the bridge. Skip digital silence, so that a bot
+        // that hears nobody does not keep its mirrors speaking.
         fn Forward(&self, user: &str, frame: AudioFrame) {
-                if frame.isQuiet(self._voiceThreshold) { return; }
+                if frame.isSilent() { return; }
                 let _ = self._heard.try_send((user.to_string(), frame));
         }
 }

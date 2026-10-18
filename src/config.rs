@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
+use serde::de::IgnoredAny;
 use tracing::warn;
 
 use crate::platform::{PLATFORMS, Platform};
@@ -40,7 +41,6 @@ const DEFAULT_PREFIX: &str = "vp!";
 const DEFAULT_OVERFLOW_NAME: &str = "Multiple Users";
 const DEFAULT_PROXY_IDLE_NAME: &str = "Voice Pipe Proxy {number}";
 const DEFAULT_LOG_LEVEL: &str = "info";
-const DEFAULT_VOICE_THRESHOLD: f32 = 200.0;
 const DEFAULT_HANGOVER_MS: u64 = 300;
 const DEFAULT_JITTER_FRAMES: usize = 3;
 // Shortest hangover. Below one 20 ms frame, playback stops after each frame.
@@ -70,8 +70,10 @@ pub struct GeneralSettings {
         _proxyIdleName: String,
         #[serde(rename = "log_level")]
         _logLevel: String,
+        // Removed setting. It is still read, so that an old config file
+        // loads, and Validate tells the operator to remove it.
         #[serde(rename = "voice_threshold")]
-        _voiceThreshold: f32,
+        _removedVoiceThreshold: Option<IgnoredAny>,
         #[serde(rename = "silence_hangover_ms")]
         _silenceHangoverMs: u64,
         #[serde(rename = "jitter_frames")]
@@ -139,7 +141,6 @@ impl GeneralSettings {
         pub fn isAfkIgnored(&self) -> bool { self._isAfkIgnored }
         pub fn getOverflowName(&self) -> &str { &self._overflowName }
         pub fn getLogLevel(&self) -> &str { &self._logLevel }
-        pub fn getVoiceThreshold(&self) -> f32 { self._voiceThreshold }
         pub fn getJitterFrames(&self) -> usize { self._jitterFrames }
 
         pub fn getSilenceHangover(&self) -> Duration {
@@ -159,12 +160,11 @@ impl GeneralSettings {
                 if self._commandPrefix.trim().is_empty() {
                         bail!("general.command_prefix must not be empty");
                 }
-                if self._voiceThreshold.is_nan() {
-                        bail!("general.voice_threshold must be a number");
-                }
-                if self._voiceThreshold < 0.0 {
-                        warn!("general.voice_threshold is below 0, using 0");
-                        self._voiceThreshold = 0.0;
+                if self._removedVoiceThreshold.is_some() {
+                        warn!(
+                                "general.voice_threshold is no longer used, \
+                                 remove it from the config"
+                        );
                 }
                 if self._silenceHangoverMs < HANGOVER_MIN_MS {
                         warn!(
@@ -191,7 +191,7 @@ impl Default for GeneralSettings {
                         _overflowName: DEFAULT_OVERFLOW_NAME.into(),
                         _proxyIdleName: DEFAULT_PROXY_IDLE_NAME.into(),
                         _logLevel: DEFAULT_LOG_LEVEL.into(),
-                        _voiceThreshold: DEFAULT_VOICE_THRESHOLD,
+                        _removedVoiceThreshold: None,
                         _silenceHangoverMs: DEFAULT_HANGOVER_MS,
                         _jitterFrames: DEFAULT_JITTER_FRAMES,
                 }
@@ -329,18 +329,15 @@ impl Config {
                 }
         }
 
-        // Read the config file, fill in defaults, and validate all settings.
-        pub fn Load(path: &Path) -> Result<Config> {
+        // Read the config file. Call Prepare before the config is used.
+        pub fn Read(path: &Path) -> Result<Config> {
                 let text = fs::read_to_string(path).with_context(|| {
                         let name = path.display();
                         format!("cannot read {name}, copy config.example.toml")
                 })?;
-                let mut config: Config =
-                        toml::from_str(&text).with_context(|| {
-                                format!("{} is not valid", path.display())
-                        })?;
-                config.Prepare()?;
-                Ok(config)
+                toml::from_str(&text).with_context(|| {
+                        format!("{} is not valid", path.display())
+                })
         }
 
         fn getPlatformMut(
@@ -354,7 +351,7 @@ impl Config {
         }
 
         // Apply defaults and validate each part of the config.
-        fn Prepare(&mut self) -> Result<()> {
+        pub fn Prepare(&mut self) -> Result<()> {
                 self._general.Validate()?;
                 for platform in PLATFORMS {
                         let settings = self.getPlatformMut(platform);
@@ -489,6 +486,15 @@ mod tests {
                         config.getGeneral().getSilenceHangover(),
                         Duration::from_millis(HANGOVER_MIN_MS)
                 );
+        }
+
+        #[test]
+        fn OldVoiceThresholdStillLoads() {
+                let text = MINIMAL.replace(
+                        "[discord]",
+                        "[general]\nvoice_threshold = 200\n[discord]",
+                );
+                Parse(&text);
         }
 
         #[test]

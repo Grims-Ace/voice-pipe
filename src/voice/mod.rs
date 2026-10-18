@@ -35,7 +35,6 @@ const SEND_QUEUE: usize = 64;
 // Values that control when audio counts as speech.
 #[derive(Clone, Copy, Debug)]
 pub struct AudioTuning {
-        _voiceThreshold: f32,
         _hangover: Duration,
 }
 
@@ -59,14 +58,12 @@ pub enum VoiceConnection {
 }
 
 impl AudioTuning {
-        pub fn getVoiceThreshold(&self) -> f32 { self._voiceThreshold }
         pub fn getHangover(&self) -> Duration { self._hangover }
 
-        // `voice_threshold` is the frame level below which audio is silence.
         // `hangover` is how long a bot keeps sending after speech stops, so
         // that the ends of words are not cut.
-        pub fn New(voice_threshold: f32, hangover: Duration) -> Self {
-                Self { _voiceThreshold: voice_threshold, _hangover: hangover }
+        pub fn New(hangover: Duration) -> Self {
+                Self { _hangover: hangover }
         }
 }
 
