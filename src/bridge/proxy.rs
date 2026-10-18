@@ -13,7 +13,9 @@ use anyhow::Result;
 use tracing::{info, warn};
 
 use super::hub::Hub;
-use crate::gateway::{Gateway, INTENT_GUILD_VOICE_STATES, INTENT_GUILDS};
+use crate::gateway::{
+        Gateway, INTENT_GUILD_VOICE_STATES, INTENT_GUILDS, VoiceFlags,
+};
 use crate::platform::Platform;
 use crate::rest::{NICKNAME_MAX, RestClient, Truncate, UserProfile};
 use crate::voice::{VoiceConnection, VoiceTarget};
@@ -81,6 +83,7 @@ pub struct ProxySession {
         _gateway: Gateway,
         _voice: VoiceConnection,
         _guildId: String,
+        _voiceFlags: VoiceFlags,
 }
 
 // ============================================================================
@@ -270,6 +273,21 @@ impl ProxySession {
         }
         pub fn getVoice(&self) -> &VoiceConnection { &self._voice }
 
+        // Show a mute and deafen state on the proxy in `channel_id`, the
+        // channel that it is in. Send it only when it changes.
+        pub fn ShowVoiceFlags(&mut self, channel_id: &str, flags: VoiceFlags) {
+                if flags == self._voiceFlags { return; }
+                let gateway = &self._gateway;
+                match gateway.SetVoiceFlags(&self._guildId, channel_id, flags) {
+                        Ok(()) => self._voiceFlags = flags,
+                        Err(e) => {
+                                let bot = self._account.getBotId();
+                                let error = format!("{e:#}");
+                                warn!(%bot, %error, "cannot set mute state");
+                        }
+                }
+        }
+
         // Give the proxy the look of `look`, log it in, and join the channel
         // of `target`. Give the account back on failure.
         #[allow(clippy::result_large_err)]
@@ -306,6 +324,7 @@ impl ProxySession {
                                         _gateway: gateway,
                                         _voice: voice,
                                         _guildId: side.getGuildId().to_string(),
+                                        _voiceFlags: VoiceFlags::default(),
                                 });
                         }
                         Ok(Err(e)) => format!("{e:#}"),

@@ -23,6 +23,7 @@ use super::overflow::OverflowMixer;
 use super::proxy::{ProxyAccount, ProxyLook, ProxySession};
 use super::status::SideStatus;
 use crate::audio::AudioFrame;
+use crate::gateway::VoiceFlags;
 use crate::platform::Platform;
 use crate::voice::{SpeakerFrame, VoiceConnection, VoiceTarget};
 
@@ -73,6 +74,7 @@ pub struct Side {
         _target: VoiceTarget,
         _proxies: HashMap<String, ProxySession>,
         _opening: HashSet<String>,
+        _userFlags: HashMap<String, VoiceFlags>,
         _group: Option<GroupBot>,
         _groupUsers: HashSet<String>,
         _isMainOpening: bool,
@@ -193,6 +195,7 @@ impl Side {
                         _target: target,
                         _proxies: HashMap::new(),
                         _opening: HashSet::new(),
+                        _userFlags: HashMap::new(),
                         _group: None,
                         _groupUsers: HashSet::new(),
                         _isMainOpening: false,
@@ -211,9 +214,36 @@ impl Side {
         // Mirrors
         // ====================================================================
 
-        // Make the mirrors in this channel match `users`, the people in the
-        // linked channel on the other platform.
-        pub fn Sync(&mut self, users: &HashSet<String>) {
+        // Make the mirrors in this channel match `people`, the people in the
+        // linked channel on the other platform. Keep their mute and deafen
+        // state for ApplyVoiceFlags.
+        pub fn Sync(&mut self, people: &HashMap<String, VoiceFlags>) {
+                self._userFlags = people.clone();
+                let users: HashSet<String> = people.keys().cloned().collect();
+                self.SyncUsers(&users);
+        }
+
+        // Show the mute and deafen state of each person on their proxy. The
+        // listener is never deafened, because a deafened bot can stop
+        // getting the audio that it must relay.
+        pub fn ApplyVoiceFlags(&mut self) {
+                let listener = match &self._listener {
+                        Some(Listener::Proxy(user)) => Some(user.as_str()),
+                        _ => None,
+                };
+                let channel = self._key.getChannelId(self._platform);
+                for (user, session) in self._proxies.iter_mut() {
+                        let flags = self._userFlags.get(user).copied();
+                        let flags = flags.unwrap_or_default();
+                        let flags = match listener == Some(user.as_str()) {
+                                true => flags.WithoutDeafen(),
+                                false => flags,
+                        };
+                        session.ShowVoiceFlags(channel, flags);
+                }
+        }
+
+        fn SyncUsers(&mut self, users: &HashSet<String>) {
                 self.RemoveDeparted(users);
                 if users.is_empty() {
                         self.ReleaseGroup();
@@ -518,9 +548,13 @@ impl Side {
                         return false;
                 };
                 self.StopListeningTo(&Listener::Proxy(user.clone()));
-                let Some(session) = self._proxies.remove(&user) else {
+                let Some(mut session) = self._proxies.remove(&user) else {
                         return false;
                 };
+                // A group is many people, so the group bot is never muted
+                // or deafened.
+                let channel = self._key.getChannelId(self._platform);
+                session.ShowVoiceFlags(channel, VoiceFlags::default());
                 info!(
                         platform = %self._platform,
                         %user,
@@ -707,15 +741,27 @@ impl Side {
                 }
         }
 
+        // Prefer the group bot, then a proxy whose person is not deafened,
+        // because that proxy can show the right state while it listens.
         fn ChooseListener(&self) -> Option<Listener> {
                 let group = self._group.as_ref();
                 if group.is_some_and(|g| g.getVoice().isConnected()) {
                         return Some(Listener::Group);
                 }
-                self._proxies
+                let connected: Vec<&String> = self
+                        ._proxies
                         .iter()
-                        .find(|(_, s)| s.getVoice().isConnected())
-                        .map(|(user, _)| Listener::Proxy(user.clone()))
+                        .filter(|(_, s)| s.getVoice().isConnected())
+                        .map(|(user, _)| user)
+                        .collect();
+                let is_deafened = |user: &&String| {
+                        let flags = self._userFlags.get(*user);
+                        flags.is_some_and(|f| f.isDeafened())
+                };
+                let hearing = connected.iter().find(|u| !is_deafened(u));
+                hearing
+                        .or(connected.first())
+                        .map(|user| Listener::Proxy((*user).clone()))
         }
 }
 

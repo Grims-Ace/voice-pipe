@@ -1,11 +1,12 @@
 // ============================================================================
 // ============================================================================
 // Hold the state that all links share: the main bot of each platform, its
-// gateway, the proxy pool, and the on/off switch of the bridge.
+// gateway, the proxy pool, and the on/off switch of the bridge. The switch
+// state is saved, so that it stays the same after a restart.
 // ============================================================================
 // ============================================================================
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -16,10 +17,12 @@ use tracing::{error, info};
 
 use super::link::LinkKey;
 use super::proxy::{ProxyAccount, ProxyPool};
+use super::saved;
 use crate::config::{Config, GeneralSettings, PlatformSettings};
 use crate::gateway::{
         Gateway, GatewaySettings, INTENT_GUILD_MESSAGES,
         INTENT_GUILD_VOICE_STATES, INTENT_GUILDS, INTENT_MESSAGE_CONTENT,
+        VoiceFlags,
 };
 use crate::platform::Platform;
 use crate::rest::RestClient;
@@ -83,12 +86,16 @@ impl PlatformHub {
                 (pool.getFreeCount(), pool.getHeldCount(), pool.getTotal())
         }
 
-        // Return the people in a voice channel, without the bridge bots.
-        pub fn getHumans(&self, channel_id: &str) -> HashSet<String> {
+        // Return the people in a voice channel, without the bridge bots,
+        // with their mute and deafen state.
+        pub fn getHumans(
+                &self,
+                channel_id: &str,
+        ) -> HashMap<String, VoiceFlags> {
                 let mut users = self
                         ._gateway
                         .getChannelUsers(&self._guildId, channel_id);
-                users.retain(|u| !self._botIds.contains(u));
+                users.retain(|u, _| !self._botIds.contains(u));
                 users
         }
 
@@ -213,9 +220,13 @@ impl Hub {
                 }
         }
 
+        // Turn the bridge on or off, and save the state for a restart.
         pub fn SetEnabled(&self, is_enabled: bool) {
                 self._isEnabled.store(is_enabled, Ordering::Relaxed);
                 info!(is_enabled, "bridge switched");
+                let general = self._config.getGeneral();
+                let Some(path) = general.getStateFile() else { return };
+                saved::WriteEnabled(&path, is_enabled);
         }
 
         // Log in all bots on both platforms.
@@ -226,9 +237,10 @@ impl Hub {
                         PlatformHub::Start(Platform::Fluxer, &config, &http),
                 )?;
                 let general = config.getGeneral();
+                let is_enabled = FindStartState(general);
                 Ok(Arc::new(Hub {
                         _tuning: AudioTuning::New(general.getSilenceHangover()),
-                        _isEnabled: AtomicBool::new(general.isStartEnabled()),
+                        _isEnabled: AtomicBool::new(is_enabled),
                         _config: config,
                         _discord: discord,
                         _fluxer: fluxer,
@@ -247,6 +259,18 @@ impl Hub {
 // ============================================================================
 // Helper Functions
 // ============================================================================
+
+// Use the saved switch state. Use start_enabled when no state was saved.
+fn FindStartState(general: &GeneralSettings) -> bool {
+        let saved = general.getStateFile().and_then(|p| saved::ReadEnabled(&p));
+        match saved {
+                Some(is_enabled) => {
+                        info!(is_enabled, "saved switch state loaded");
+                        is_enabled
+                }
+                None => general.isStartEnabled(),
+        }
+}
 
 // The Discord main bot reads chat messages for the commands.
 fn BuildMainGatewaySettings(

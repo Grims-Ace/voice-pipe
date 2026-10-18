@@ -89,7 +89,9 @@ pub struct ChannelData {
         pub position: Option<i64>,
 }
 
-#[derive(Debug, Deserialize)]
+// `mute` and `deaf` are set by a moderator. `self_mute` and `self_deaf` are
+// set by the user.
+#[derive(Debug, Default, Deserialize)]
 pub struct VoiceStateData {
         #[serde(default)]
         pub guild_id: Option<String>,
@@ -99,6 +101,14 @@ pub struct VoiceStateData {
         pub user_id: Option<String>,
         #[serde(default)]
         pub session_id: Option<String>,
+        #[serde(default)]
+        pub mute: bool,
+        #[serde(default)]
+        pub deaf: bool,
+        #[serde(default)]
+        pub self_mute: bool,
+        #[serde(default)]
+        pub self_deaf: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -190,13 +200,19 @@ pub fn BuildHeartbeat(sequence: Option<u64>) -> String {
         json!({ "op": OP_HEARTBEAT, "d": sequence }).to_string()
 }
 
-// Join a voice channel, or leave voice when `channel_id` is None.
-pub fn BuildVoiceState(guild_id: &str, channel_id: Option<&str>) -> String {
+// Join a voice channel, or leave voice when `channel_id` is None. A second
+// update for the same channel changes only the mute and deafen state.
+pub fn BuildVoiceState(
+        guild_id: &str,
+        channel_id: Option<&str>,
+        is_muted: bool,
+        is_deafened: bool,
+) -> String {
         let data = json!({
                 "guild_id": guild_id,
                 "channel_id": channel_id,
-                "self_mute": false,
-                "self_deaf": false,
+                "self_mute": is_muted,
+                "self_deaf": is_deafened,
         });
         json!({ "op": OP_VOICE_STATE_UPDATE, "d": data }).to_string()
 }
@@ -230,11 +246,18 @@ mod tests {
 
         #[test]
         fn LeaveSendsNullChannel() {
-                let v: Value =
-                        serde_json::from_str(&BuildVoiceState("g", None))
-                                .unwrap();
+                let text = BuildVoiceState("g", None, false, false);
+                let v: Value = serde_json::from_str(&text).unwrap();
                 assert_eq!(v["op"], 4);
                 assert!(v["d"]["channel_id"].is_null());
+        }
+
+        #[test]
+        fn VoiceStateCarriesFlags() {
+                let text = BuildVoiceState("g", Some("c"), true, false);
+                let v: Value = serde_json::from_str(&text).unwrap();
+                assert_eq!(v["d"]["self_mute"], true);
+                assert_eq!(v["d"]["self_deaf"], false);
         }
 
         #[test]

@@ -5,7 +5,7 @@
 // ============================================================================
 // ============================================================================
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use super::protocol::{ChannelData, GuildCreate, GuildUpdate, VoiceStateData};
 
@@ -18,12 +18,26 @@ pub struct VoiceChannel {
         _position: i64,
 }
 
-// The voice channels of one guild and the channel that each user is in.
-// Text channels are never stored.
+// The mute and deafen state of a user in voice. The user counts as muted
+// when the user or a moderator muted them, and the same for deafened.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct VoiceFlags {
+        _isMuted: bool,
+        _isDeafened: bool,
+}
+
+// The voice channel of a user and their mute and deafen state.
+struct UserVoice {
+        _channelId: String,
+        _flags: VoiceFlags,
+}
+
+// The voice channels of one guild and the voice state of each user in
+// voice. Text channels are never stored.
 #[derive(Default)]
 struct GuildState {
         _channels: HashMap<String, VoiceChannel>,
-        _userChannels: HashMap<String, String>,
+        _userVoices: HashMap<String, UserVoice>,
         _afkChannelId: Option<String>,
 }
 
@@ -55,6 +69,32 @@ impl VoiceChannel {
         // IDs are smaller numbers.
         fn getSortKey(&self) -> (i64, u128, &str) {
                 (self._position, self._idNumber, &self._id)
+        }
+}
+
+impl VoiceFlags {
+        pub fn isMuted(&self) -> bool { self._isMuted }
+        pub fn isDeafened(&self) -> bool { self._isDeafened }
+
+        pub fn New(is_muted: bool, is_deafened: bool) -> Self {
+                Self { _isMuted: is_muted, _isDeafened: is_deafened }
+        }
+
+        fn FromData(data: &VoiceStateData) -> Self {
+                let is_muted = data.mute || data.self_mute;
+                Self::New(is_muted, data.deaf || data.self_deaf)
+        }
+
+        // Keep the mute, but remove the deafen.
+        pub fn WithoutDeafen(self) -> Self { Self::New(self._isMuted, false) }
+}
+
+impl UserVoice {
+        fn FromData(channel_id: &str, data: &VoiceStateData) -> Self {
+                Self {
+                        _channelId: channel_id.to_string(),
+                        _flags: VoiceFlags::FromData(data),
+                }
         }
 }
 
@@ -96,22 +136,24 @@ impl GatewayState {
                 guild_id: &str,
                 user: &str,
         ) -> Option<String> {
-                self._guilds.get(guild_id)?._userChannels.get(user).cloned()
+                let guild = self._guilds.get(guild_id)?;
+                Some(guild._userVoices.get(user)?._channelId.clone())
         }
 
-        // Return the IDs of all users in a voice channel, bots included.
+        // Return all users in a voice channel (bots included), with their
+        // mute and deafen state.
         pub fn getChannelUsers(
                 &self,
                 guild_id: &str,
                 channel_id: &str,
-        ) -> HashSet<String> {
+        ) -> HashMap<String, VoiceFlags> {
                 let Some(guild) = self._guilds.get(guild_id) else {
-                        return HashSet::new();
+                        return HashMap::new();
                 };
-                guild._userChannels
+                guild._userVoices
                         .iter()
-                        .filter(|(_, channel)| *channel == channel_id)
-                        .map(|(user, _)| user.clone())
+                        .filter(|(_, voice)| voice._channelId == channel_id)
+                        .map(|(user, voice)| (user.clone(), voice._flags))
                         .collect()
         }
 
@@ -131,8 +173,8 @@ impl GatewayState {
                         else {
                                 continue;
                         };
-                        guild._userChannels
-                                .insert(user.clone(), channel.clone());
+                        let voice = UserVoice::FromData(channel, state);
+                        guild._userVoices.insert(user.clone(), voice);
                 }
                 self._guilds.insert(data.id.clone(), guild);
         }
@@ -149,7 +191,8 @@ impl GatewayState {
                 }
         }
 
-        // Move a user to a channel, or out of voice when the channel is null.
+        // Move a user to a channel and record their mute and deafen state,
+        // or take them out of voice when the channel is null.
         pub fn ApplyVoiceState(&mut self, data: &VoiceStateData) {
                 let (Some(guild_id), Some(user)) =
                         (&data.guild_id, &data.user_id)
@@ -157,12 +200,12 @@ impl GatewayState {
                         return;
                 };
                 let guild = self._guilds.entry(guild_id.clone()).or_default();
-                match &data.channel_id {
-                        Some(channel) => guild
-                                ._userChannels
-                                .insert(user.clone(), channel.clone()),
-                        None => guild._userChannels.remove(user),
+                let Some(channel) = &data.channel_id else {
+                        guild._userVoices.remove(user);
+                        return;
                 };
+                let voice = UserVoice::FromData(channel, data);
+                guild._userVoices.insert(user.clone(), voice);
         }
 
         // Add or change a voice channel. An update without a type is partial,
@@ -189,7 +232,8 @@ impl GatewayState {
                         return;
                 };
                 guild._channels.remove(&data.id);
-                guild._userChannels.retain(|_, channel| *channel != data.id);
+                let voices = &mut guild._userVoices;
+                voices.retain(|_, voice| voice._channelId != data.id);
         }
 }
 
@@ -204,7 +248,7 @@ mod tests {
                         guild_id: Some("g".into()),
                         channel_id: channel.map(String::from),
                         user_id: Some(user.into()),
-                        session_id: None,
+                        ..Default::default()
                 }
         }
 
@@ -214,9 +258,25 @@ mod tests {
                 state.ApplyVoiceState(&VoiceState("u1", Some("c1")));
                 state.ApplyVoiceState(&VoiceState("u1", Some("c2")));
                 assert!(state.getChannelUsers("g", "c1").is_empty());
-                assert!(state.getChannelUsers("g", "c2").contains("u1"));
+                assert!(state.getChannelUsers("g", "c2").contains_key("u1"));
                 state.ApplyVoiceState(&VoiceState("u1", None));
                 assert!(state.getChannelUsers("g", "c2").is_empty());
+        }
+
+        #[test]
+        fn VoiceStateRecordsMuteAndDeafen() {
+                let mut state = GatewayState::default();
+                let muted = VoiceStateData {
+                        self_mute: true,
+                        deaf: true,
+                        ..VoiceState("u1", Some("c1"))
+                };
+                state.ApplyVoiceState(&muted);
+                let users = state.getChannelUsers("g", "c1");
+                assert_eq!(users["u1"], VoiceFlags::New(true, true));
+                state.ApplyVoiceState(&VoiceState("u1", Some("c1")));
+                let users = state.getChannelUsers("g", "c1");
+                assert_eq!(users["u1"], VoiceFlags::default());
         }
 
         #[test]
@@ -229,7 +289,7 @@ mod tests {
                 let mut state = GatewayState::default();
                 state.ApplyGuildCreate(&data);
                 assert_eq!(state.getVoiceChannels("g").len(), 1);
-                assert!(state.getChannelUsers("g", "c1").contains("u1"));
+                assert!(state.getChannelUsers("g", "c1").contains_key("u1"));
         }
 
         fn Channel(value: serde_json::Value) -> ChannelData {

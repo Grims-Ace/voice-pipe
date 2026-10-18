@@ -5,7 +5,7 @@
 // ============================================================================
 // ============================================================================
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -18,6 +18,7 @@ use super::hub::Hub;
 use super::side::{Side, SideEvent};
 use super::status::LinkStatus;
 use crate::audio::{AudioFrame, FRAME_TIME};
+use crate::gateway::VoiceFlags;
 use crate::platform::Platform;
 use crate::voice::SpeakerFrame;
 
@@ -45,11 +46,12 @@ pub struct LinkKey {
         _fluxerChannelId: String,
 }
 
-// The people (bots not included) in the two channels of a link.
+// The people (bots not included) in the two channels of a link, with their
+// mute and deafen state. A change of either wakes the link.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Occupancy {
-        _discordUsers: HashSet<String>,
-        _fluxerUsers: HashSet<String>,
+        _discordUsers: HashMap<String, VoiceFlags>,
+        _fluxerUsers: HashMap<String, VoiceFlags>,
 }
 
 // The coordinator's handle to a running link task.
@@ -110,7 +112,10 @@ impl LinkKey {
 }
 
 impl Occupancy {
-        pub fn getUsers(&self, platform: Platform) -> &HashSet<String> {
+        pub fn getUsers(
+                &self,
+                platform: Platform,
+        ) -> &HashMap<String, VoiceFlags> {
                 match platform {
                         Platform::Discord => &self._discordUsers,
                         Platform::Fluxer => &self._fluxerUsers,
@@ -127,8 +132,8 @@ impl Occupancy {
         }
 
         pub fn New(
-                discord_users: HashSet<String>,
-                fluxer_users: HashSet<String>,
+                discord_users: HashMap<String, VoiceFlags>,
+                fluxer_users: HashMap<String, VoiceFlags>,
         ) -> Self {
                 Self {
                         _discordUsers: discord_users,
@@ -315,8 +320,9 @@ impl Link {
                 }
         }
 
-        // Make both sides match the people in the opposite channel, and turn
-        // listening on only when both channels have people.
+        // Make both sides match the people in the opposite channel, turn
+        // listening on only when both channels have people, and show the
+        // mute and deafen state of each person on their proxy.
         fn Sync(&mut self) {
                 let occupancy = self._occupancy.borrow().clone();
                 self._discord.Sync(occupancy.getUsers(Platform::Fluxer));
@@ -332,6 +338,8 @@ impl Link {
                 }
                 self._discord.UpdateListener(is_active);
                 self._fluxer.UpdateListener(is_active);
+                self._discord.ApplyVoiceFlags();
+                self._fluxer.ApplyVoiceFlags();
                 self.PublishStatus(&occupancy);
         }
 

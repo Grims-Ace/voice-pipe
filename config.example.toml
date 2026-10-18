@@ -15,7 +15,12 @@
 command_prefix = "vp!"
 
 # Start with the bridge on (true) or off (false). vp!toggle changes it.
+# After the first toggle, the saved state in state_file is used instead.
 start_enabled = true
+
+# File that keeps the on/off state of vp!toggle after a restart. A relative
+# path is relative to the working directory. Set "" to not save the state.
+state_file = "voice-pipe-state.toml"
 
 # Link voice channels that have the same name on both platforms (outer
 # spaces are ignored, but names are case-sensitive). The [[links]] entries

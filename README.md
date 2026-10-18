@@ -33,7 +33,10 @@ The bridge uses two types of bot on each platform:
 - **Proxy bots** (zero or more for each platform). A proxy copies the
   nickname and avatar of one person from the other platform and joins voice
   as that person. A proxy on Discord shows a Fluxer user. A proxy on Fluxer
-  shows a Discord user.
+  shows a Discord user. A proxy also shows when its person is muted or
+  deafened. A proxy that receives audio for the bridge (the *listener*,
+  see below) shows the mute, but never deafens, because a deafened bot can
+  stop getting audio.
 
 ### Single proxies and group bots
 
@@ -248,7 +251,8 @@ Optional settings:
 | `discord.proxy_tokens` | `[]` | Discord proxies (mirror Fluxer users) |
 | `fluxer.proxy_tokens` | `[]` | Fluxer proxies (mirror Discord users) |
 | `general.command_prefix` | `vp!` | Prefix of the chat commands |
-| `general.start_enabled` | `true` | Start with the bridge on |
+| `general.start_enabled` | `true` | Start with the bridge on (when no state is saved) |
+| `general.state_file` | `voice-pipe-state.toml` | File that keeps the toggle state (`""` = do not save) |
 | `general.match_by_name` | `true` | Link channels with the same name |
 | `general.ignore_afk_channels` | `true` | Do not link AFK channels by name |
 | `general.overflow_name` | `Multiple Users` | Nickname of a group bot |
@@ -338,8 +342,11 @@ In Fluxer: Multiple Users (3)
 Relayed speech: 41.2 s to Discord, 63.8 s to Fluxer
 ```
 
-The toggle state is not saved. After a restart, `start_enabled` decides
-it.
+The toggle state is saved in `state_file` (default
+`voice-pipe-state.toml` in the working directory), so it stays the same
+after a restart. `start_enabled` is used only when there is no saved state.
+The bot user must be able to write to that directory (for the systemd
+example below, `/opt/voice-pipe`).
 
 ## Troubleshooting
 

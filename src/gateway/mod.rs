@@ -9,7 +9,7 @@ mod protocol;
 mod session;
 mod state;
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -24,7 +24,7 @@ pub use protocol::{
         INTENT_GUILD_MESSAGES, INTENT_GUILD_VOICE_STATES, INTENT_GUILDS,
         INTENT_MESSAGE_CONTENT,
 };
-pub use state::VoiceChannel;
+pub use state::{VoiceChannel, VoiceFlags};
 
 use crate::platform::Platform;
 use protocol::{
@@ -346,12 +346,13 @@ impl Gateway {
                 self._shared._state.lock().unwrap().getVoiceChannels(guild_id)
         }
 
-        // Return the IDs of all users in a voice channel, bots included.
+        // Return all users in a voice channel (bots included), with their
+        // mute and deafen state.
         pub fn getChannelUsers(
                 &self,
                 guild_id: &str,
                 channel_id: &str,
-        ) -> HashSet<String> {
+        ) -> HashMap<String, VoiceFlags> {
                 self._shared
                         ._state
                         .lock()
@@ -462,7 +463,9 @@ impl Gateway {
                                 _sender: sender,
                         });
                 let channel = Some(channel_id);
-                let payload = protocol::BuildVoiceState(guild_id, channel);
+                let payload = protocol::BuildVoiceState(
+                        guild_id, channel, false, false,
+                );
                 self.Send(payload)?;
                 let label = &self._label;
                 let waited = tokio::time::timeout(JOIN_TIMEOUT, receiver).await;
@@ -513,15 +516,31 @@ impl Gateway {
 
         // Take the bot out of voice in a guild.
         pub fn LeaveVoice(&self, guild_id: &str) {
-                if let Err(e) =
-                        self.Send(protocol::BuildVoiceState(guild_id, None))
-                {
+                let payload =
+                        protocol::BuildVoiceState(guild_id, None, false, false);
+                if let Err(e) = self.Send(payload) {
                         warn!(
                                 gateway = %self._label,
                                 error = %e,
                                 "cannot send voice leave",
                         );
                 }
+        }
+
+        // Change the mute and deafen state of the bot. The bot stays in
+        // `channel_id`, the channel that it is in now.
+        pub fn SetVoiceFlags(
+                &self,
+                guild_id: &str,
+                channel_id: &str,
+                flags: VoiceFlags,
+        ) -> Result<()> {
+                self.Send(protocol::BuildVoiceState(
+                        guild_id,
+                        Some(channel_id),
+                        flags.isMuted(),
+                        flags.isDeafened(),
+                ))
         }
 
         // Send the queued messages, log out, and wait for the task to end.

@@ -7,7 +7,7 @@
 
 use std::collections::HashSet;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -41,6 +41,7 @@ const DEFAULT_PREFIX: &str = "vp!";
 const DEFAULT_OVERFLOW_NAME: &str = "Multiple Users";
 const DEFAULT_PROXY_IDLE_NAME: &str = "Voice Pipe Proxy {number}";
 const DEFAULT_LOG_LEVEL: &str = "info";
+const DEFAULT_STATE_FILE: &str = "voice-pipe-state.toml";
 const DEFAULT_HANGOVER_MS: u64 = 300;
 const DEFAULT_JITTER_FRAMES: usize = 3;
 // Shortest hangover. Below one 20 ms frame, playback stops after each frame.
@@ -60,6 +61,8 @@ pub struct GeneralSettings {
         _commandPrefix: String,
         #[serde(rename = "start_enabled")]
         _isStartEnabled: bool,
+        #[serde(rename = "state_file")]
+        _stateFile: String,
         #[serde(rename = "match_by_name")]
         _isNameMatchEnabled: bool,
         #[serde(rename = "ignore_afk_channels")]
@@ -137,6 +140,13 @@ pub struct Config {
 impl GeneralSettings {
         pub fn getCommandPrefix(&self) -> &str { &self._commandPrefix }
         pub fn isStartEnabled(&self) -> bool { self._isStartEnabled }
+
+        // Return the file that keeps the switch state after a restart, or
+        // None when the state is not saved.
+        pub fn getStateFile(&self) -> Option<PathBuf> {
+                let path = self._stateFile.trim();
+                (!path.is_empty()).then(|| PathBuf::from(path))
+        }
         pub fn isNameMatchEnabled(&self) -> bool { self._isNameMatchEnabled }
         pub fn isAfkIgnored(&self) -> bool { self._isAfkIgnored }
         pub fn getOverflowName(&self) -> &str { &self._overflowName }
@@ -186,6 +196,7 @@ impl Default for GeneralSettings {
                 Self {
                         _commandPrefix: DEFAULT_PREFIX.into(),
                         _isStartEnabled: true,
+                        _stateFile: DEFAULT_STATE_FILE.into(),
                         _isNameMatchEnabled: true,
                         _isAfkIgnored: true,
                         _overflowName: DEFAULT_OVERFLOW_NAME.into(),
