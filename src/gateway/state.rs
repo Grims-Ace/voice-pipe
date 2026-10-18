@@ -18,15 +18,14 @@ pub struct VoiceChannel {
         _position: i64,
 }
 
-// The mute and deafen state of a user in voice. The user counts as muted
-// when the user or a moderator muted them, and the same for deafened.
+// The voice state of a user that a proxy shows. The user counts as muted
+// when the user or a moderator muted them. Deafen is not shown.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct VoiceFlags {
         _isMuted: bool,
-        _isDeafened: bool,
 }
 
-// The voice channel of a user and their mute and deafen state.
+// The voice channel of a user and their mute state.
 struct UserVoice {
         _channelId: String,
         _flags: VoiceFlags,
@@ -74,19 +73,12 @@ impl VoiceChannel {
 
 impl VoiceFlags {
         pub fn isMuted(&self) -> bool { self._isMuted }
-        pub fn isDeafened(&self) -> bool { self._isDeafened }
 
-        pub fn New(is_muted: bool, is_deafened: bool) -> Self {
-                Self { _isMuted: is_muted, _isDeafened: is_deafened }
-        }
+        pub fn New(is_muted: bool) -> Self { Self { _isMuted: is_muted } }
 
         fn FromData(data: &VoiceStateData) -> Self {
-                let is_muted = data.mute || data.self_mute;
-                Self::New(is_muted, data.deaf || data.self_deaf)
+                Self::New(data.mute || data.self_mute)
         }
-
-        // Keep the mute, but remove the deafen.
-        pub fn WithoutDeafen(self) -> Self { Self::New(self._isMuted, false) }
 }
 
 impl UserVoice {
@@ -141,7 +133,7 @@ impl GatewayState {
         }
 
         // Return all users in a voice channel (bots included), with their
-        // mute and deafen state.
+        // mute state.
         pub fn getChannelUsers(
                 &self,
                 guild_id: &str,
@@ -191,7 +183,7 @@ impl GatewayState {
                 }
         }
 
-        // Move a user to a channel and record their mute and deafen state,
+        // Move a user to a channel and record their mute state,
         // or take them out of voice when the channel is null.
         pub fn ApplyVoiceState(&mut self, data: &VoiceStateData) {
                 let (Some(guild_id), Some(user)) =
@@ -264,16 +256,15 @@ mod tests {
         }
 
         #[test]
-        fn VoiceStateRecordsMuteAndDeafen() {
+        fn VoiceStateRecordsMute() {
                 let mut state = GatewayState::default();
                 let muted = VoiceStateData {
-                        self_mute: true,
-                        deaf: true,
+                        mute: true,
                         ..VoiceState("u1", Some("c1"))
                 };
                 state.ApplyVoiceState(&muted);
                 let users = state.getChannelUsers("g", "c1");
-                assert_eq!(users["u1"], VoiceFlags::New(true, true));
+                assert_eq!(users["u1"], VoiceFlags::New(true));
                 state.ApplyVoiceState(&VoiceState("u1", Some("c1")));
                 let users = state.getChannelUsers("g", "c1");
                 assert_eq!(users["u1"], VoiceFlags::default());

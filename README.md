@@ -33,10 +33,9 @@ The bridge uses two types of bot on each platform:
 - **Proxy bots** (zero or more for each platform). A proxy copies the
   nickname and avatar of one person from the other platform and joins voice
   as that person. A proxy on Discord shows a Fluxer user. A proxy on Fluxer
-  shows a Discord user. A proxy also shows when its person is muted or
-  deafened. A proxy that receives audio for the bridge (the *listener*,
-  see below) shows the mute, but never deafens, because a deafened bot can
-  stop getting audio.
+  shows a Discord user. A proxy also shows when its person is muted. Deafen
+  is not shown, because a deafened bot can stop getting the audio that it
+  relays. A group bot speaks for many people, so it never shows a mute.
 
 ### Single proxies and group bots
 

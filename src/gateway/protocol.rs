@@ -89,8 +89,9 @@ pub struct ChannelData {
         pub position: Option<i64>,
 }
 
-// `mute` and `deaf` are set by a moderator. `self_mute` and `self_deaf` are
-// set by the user.
+// `mute` is set by a moderator. `self_mute` is set by the user. Only Fluxer
+// sends `connection_id`, because one Fluxer user can have many voice
+// connections.
 #[derive(Debug, Default, Deserialize)]
 pub struct VoiceStateData {
         #[serde(default)]
@@ -102,13 +103,11 @@ pub struct VoiceStateData {
         #[serde(default)]
         pub session_id: Option<String>,
         #[serde(default)]
+        pub connection_id: Option<String>,
+        #[serde(default)]
         pub mute: bool,
         #[serde(default)]
-        pub deaf: bool,
-        #[serde(default)]
         pub self_mute: bool,
-        #[serde(default)]
-        pub self_deaf: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -201,19 +200,25 @@ pub fn BuildHeartbeat(sequence: Option<u64>) -> String {
 }
 
 // Join a voice channel, or leave voice when `channel_id` is None. A second
-// update for the same channel changes only the mute and deafen state.
+// update for the same channel changes only the mute state. Fluxer needs
+// `connection_id` to know which voice connection of the bot to change.
+// Discord has no connection ID, so the key is sent only when it is known.
+// The bots never deafen.
 pub fn BuildVoiceState(
         guild_id: &str,
         channel_id: Option<&str>,
         is_muted: bool,
-        is_deafened: bool,
+        connection_id: Option<&str>,
 ) -> String {
-        let data = json!({
+        let mut data = json!({
                 "guild_id": guild_id,
                 "channel_id": channel_id,
                 "self_mute": is_muted,
-                "self_deaf": is_deafened,
+                "self_deaf": false,
         });
+        if let Some(id) = connection_id {
+                data["connection_id"] = json!(id);
+        }
         json!({ "op": OP_VOICE_STATE_UPDATE, "d": data }).to_string()
 }
 
@@ -246,18 +251,20 @@ mod tests {
 
         #[test]
         fn LeaveSendsNullChannel() {
-                let text = BuildVoiceState("g", None, false, false);
+                let text = BuildVoiceState("g", None, false, None);
                 let v: Value = serde_json::from_str(&text).unwrap();
                 assert_eq!(v["op"], 4);
                 assert!(v["d"]["channel_id"].is_null());
+                assert!(v["d"].get("connection_id").is_none());
         }
 
         #[test]
-        fn VoiceStateCarriesFlags() {
-                let text = BuildVoiceState("g", Some("c"), true, false);
+        fn MuteUpdateCarriesConnectionId() {
+                let text = BuildVoiceState("g", Some("c"), true, Some("x1"));
                 let v: Value = serde_json::from_str(&text).unwrap();
                 assert_eq!(v["d"]["self_mute"], true);
                 assert_eq!(v["d"]["self_deaf"], false);
+                assert_eq!(v["d"]["connection_id"], "x1");
         }
 
         #[test]

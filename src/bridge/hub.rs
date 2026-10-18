@@ -87,7 +87,7 @@ impl PlatformHub {
         }
 
         // Return the people in a voice channel, without the bridge bots,
-        // with their mute and deafen state.
+        // with their mute state.
         pub fn getHumans(
                 &self,
                 channel_id: &str,

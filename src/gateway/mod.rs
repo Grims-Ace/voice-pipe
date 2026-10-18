@@ -99,6 +99,7 @@ struct GatewayShared {
         _botId: String,
         _state: Mutex<GatewayState>,
         _pendingJoin: Mutex<Option<PendingJoin>>,
+        _connectionId: Mutex<Option<String>>,
         _changed: Notify,
         _isClosed: AtomicBool,
 }
@@ -281,8 +282,27 @@ impl GatewayShared {
                 };
                 if voice.user_id.as_deref() == Some(self._botId.as_str()) {
                         self.SetJoinSession(&voice);
+                        self.SetConnectionId(&voice);
                 }
                 self._state.lock().unwrap().ApplyVoiceState(&voice);
+        }
+
+        // Keep the voice connection ID of this bot, which Fluxer needs to
+        // change the mute state later. The server echoes each change of the
+        // bot, so the debug log shows if a mute change was accepted.
+        fn SetConnectionId(&self, voice: &VoiceStateData) {
+                debug!(
+                        bot = %self._botId,
+                        channel = ?voice.channel_id,
+                        connection = ?voice.connection_id,
+                        is_muted = voice.self_mute,
+                        "voice state of this bot",
+                );
+                let mut slot = self._connectionId.lock().unwrap();
+                match &voice.channel_id {
+                        Some(_) => *slot = voice.connection_id.clone(),
+                        None => *slot = None,
+                }
         }
 
         // Give the voice server to the join that waits for this guild.
@@ -347,7 +367,7 @@ impl Gateway {
         }
 
         // Return all users in a voice channel (bots included), with their
-        // mute and deafen state.
+        // mute state.
         pub fn getChannelUsers(
                 &self,
                 guild_id: &str,
@@ -367,6 +387,7 @@ impl Gateway {
                         _botId: settings._botId.clone(),
                         _state: Mutex::new(GatewayState::default()),
                         _pendingJoin: Mutex::new(None),
+                        _connectionId: Mutex::new(None),
                         _changed: Notify::new(),
                         _isClosed: AtomicBool::new(false),
                 });
@@ -464,7 +485,7 @@ impl Gateway {
                         });
                 let channel = Some(channel_id);
                 let payload = protocol::BuildVoiceState(
-                        guild_id, channel, false, false,
+                        guild_id, channel, false, None,
                 );
                 self.Send(payload)?;
                 let label = &self._label;
@@ -509,15 +530,26 @@ impl Gateway {
                 let _ = tokio::time::timeout(STALE_LEAVE_TIMEOUT, wait).await;
         }
 
+        // Return the Fluxer voice connection ID of this bot. Discord has none.
+        fn getConnectionId(&self) -> Option<String> {
+                self._shared._connectionId.lock().unwrap().clone()
+        }
+
         fn getBotChannel(&self, guild_id: &str) -> Option<String> {
                 let state = self._shared._state.lock().unwrap();
                 state.getUserChannel(guild_id, &self._shared._botId)
         }
 
-        // Take the bot out of voice in a guild.
+        // Take the bot out of voice in a guild. Name the connection when it
+        // is known, so that Fluxer closes the correct one.
         pub fn LeaveVoice(&self, guild_id: &str) {
-                let payload =
-                        protocol::BuildVoiceState(guild_id, None, false, false);
+                let connection = self.getConnectionId();
+                let payload = protocol::BuildVoiceState(
+                        guild_id,
+                        None,
+                        false,
+                        connection.as_deref(),
+                );
                 if let Err(e) = self.Send(payload) {
                         warn!(
                                 gateway = %self._label,
@@ -527,19 +559,20 @@ impl Gateway {
                 }
         }
 
-        // Change the mute and deafen state of the bot. The bot stays in
-        // `channel_id`, the channel that it is in now.
+        // Change the mute state of the bot. The bot stays in `channel_id`,
+        // the channel that it is in now.
         pub fn SetVoiceFlags(
                 &self,
                 guild_id: &str,
                 channel_id: &str,
                 flags: VoiceFlags,
         ) -> Result<()> {
+                let connection = self.getConnectionId();
                 self.Send(protocol::BuildVoiceState(
                         guild_id,
                         Some(channel_id),
                         flags.isMuted(),
-                        flags.isDeafened(),
+                        connection.as_deref(),
                 ))
         }
 

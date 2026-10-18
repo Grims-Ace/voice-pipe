@@ -47,7 +47,7 @@ pub struct LinkKey {
 }
 
 // The people (bots not included) in the two channels of a link, with their
-// mute and deafen state. A change of either wakes the link.
+// mute state. A change of either wakes the link.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Occupancy {
         _discordUsers: HashMap<String, VoiceFlags>,
@@ -322,7 +322,7 @@ impl Link {
 
         // Make both sides match the people in the opposite channel, turn
         // listening on only when both channels have people, and show the
-        // mute and deafen state of each person on their proxy.
+        // mute state of each person on their proxy.
         fn Sync(&mut self) {
                 let occupancy = self._occupancy.borrow().clone();
                 self._discord.Sync(occupancy.getUsers(Platform::Fluxer));

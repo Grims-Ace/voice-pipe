@@ -215,7 +215,7 @@ impl Side {
         // ====================================================================
 
         // Make the mirrors in this channel match `people`, the people in the
-        // linked channel on the other platform. Keep their mute and deafen
+        // linked channel on the other platform. Keep their mute
         // state for ApplyVoiceFlags.
         pub fn Sync(&mut self, people: &HashMap<String, VoiceFlags>) {
                 self._userFlags = people.clone();
@@ -223,22 +223,13 @@ impl Side {
                 self.SyncUsers(&users);
         }
 
-        // Show the mute and deafen state of each person on their proxy. The
-        // listener is never deafened, because a deafened bot can stop
-        // getting the audio that it must relay.
+        // Show the mute state of each person on their single proxy. A group
+        // bot speaks for many people, so it never shows a mute.
         pub fn ApplyVoiceFlags(&mut self) {
-                let listener = match &self._listener {
-                        Some(Listener::Proxy(user)) => Some(user.as_str()),
-                        _ => None,
-                };
                 let channel = self._key.getChannelId(self._platform);
                 for (user, session) in self._proxies.iter_mut() {
                         let flags = self._userFlags.get(user).copied();
                         let flags = flags.unwrap_or_default();
-                        let flags = match listener == Some(user.as_str()) {
-                                true => flags.WithoutDeafen(),
-                                false => flags,
-                        };
                         session.ShowVoiceFlags(channel, flags);
                 }
         }
@@ -551,8 +542,8 @@ impl Side {
                 let Some(mut session) = self._proxies.remove(&user) else {
                         return false;
                 };
-                // A group is many people, so the group bot is never muted
-                // or deafened.
+                // A group is many people, so the group bot never shows the
+                // mute of the person that this proxy showed before.
                 let channel = self._key.getChannelId(self._platform);
                 session.ShowVoiceFlags(channel, VoiceFlags::default());
                 info!(
@@ -741,27 +732,15 @@ impl Side {
                 }
         }
 
-        // Prefer the group bot, then a proxy whose person is not deafened,
-        // because that proxy can show the right state while it listens.
         fn ChooseListener(&self) -> Option<Listener> {
                 let group = self._group.as_ref();
                 if group.is_some_and(|g| g.getVoice().isConnected()) {
                         return Some(Listener::Group);
                 }
-                let connected: Vec<&String> = self
-                        ._proxies
+                self._proxies
                         .iter()
-                        .filter(|(_, s)| s.getVoice().isConnected())
-                        .map(|(user, _)| user)
-                        .collect();
-                let is_deafened = |user: &&String| {
-                        let flags = self._userFlags.get(*user);
-                        flags.is_some_and(|f| f.isDeafened())
-                };
-                let hearing = connected.iter().find(|u| !is_deafened(u));
-                hearing
-                        .or(connected.first())
-                        .map(|user| Listener::Proxy((*user).clone()))
+                        .find(|(_, s)| s.getVoice().isConnected())
+                        .map(|(user, _)| Listener::Proxy(user.clone()))
         }
 }
 
