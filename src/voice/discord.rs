@@ -10,7 +10,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
@@ -39,6 +39,12 @@ const PLAYBACK_PREBUFFER: usize = 3;
 // Remove the oldest frames above this depth, so that delay cannot grow
 // (about 240 ms).
 const PLAYBACK_MAX_DEPTH: usize = 12;
+// RTP payload type of Opus audio on Discord. A camera sends video with other
+// payload types on the same connection, and video decoded as audio is noise.
+const OPUS_PAYLOAD_TYPE: u8 = 120;
+// Shortest time between two reports of skipped packets, so that a camera
+// that stays on does not fill the log.
+const SKIP_REPORT_INTERVAL: Duration = Duration::from_secs(60);
 
 // ============================================================================
 // Types
@@ -52,15 +58,32 @@ pub struct DiscordVoice {
         _isConnected: Arc<AtomicBool>,
 }
 
-// Records which user each audio stream (SSRC) belongs to, and forgets the
-// streams of users that leave.
+// The user of each stream (SSRC), and the one audio stream of each user. A
+// user can send more than one stream (for example a camera), and only the
+// stream that the user names when they start to speak is audio.
+#[derive(Default)]
+struct StreamMap {
+        _streamUsers: HashMap<u32, String>,
+        _audioStreams: HashMap<String, u32>,
+}
+
+// Records the audio stream of each user, and forgets the streams of users
+// that leave.
 struct SsrcTracker {
-        _ssrcUsers: Arc<Mutex<HashMap<u32, String>>>,
+        _streams: Arc<Mutex<StreamMap>>,
+}
+
+// Counts the packets that were skipped because they are not audio, and
+// writes the counts to the log at most once each report interval.
+struct SkipReport {
+        _counts: HashMap<String, u64>,
+        _lastReport: Instant,
 }
 
 // Gives the audio of each speaker to the bridge while the bot listens.
 struct VoiceReceiver {
-        _ssrcUsers: Arc<Mutex<HashMap<u32, String>>>,
+        _streams: Arc<Mutex<StreamMap>>,
+        _skipped: Mutex<SkipReport>,
         _ownBotIds: Arc<HashSet<String>>,
         _isListening: Arc<AtomicBool>,
         _heard: mpsc::Sender<SpeakerFrame>,
@@ -141,15 +164,14 @@ impl DiscordVoice {
 #[async_trait]
 impl EventHandler for SsrcTracker {
         async fn act(&self, ctx: &EventContext<'_>) -> Option<Event> {
-                let mut users = self._ssrcUsers.lock().unwrap();
+                let mut streams = self._streams.lock().unwrap();
                 match ctx {
                         EventContext::SpeakingStateUpdate(speaking) => {
-                                let user = speaking.user_id?;
-                                users.insert(speaking.ssrc, user.0.to_string());
+                                let user = speaking.user_id?.0.to_string();
+                                streams.SetAudioStream(speaking.ssrc, user);
                         }
                         EventContext::ClientDisconnect(left) => {
-                                let user = left.user_id.0.to_string();
-                                users.retain(|_, u| *u != user);
+                                streams.RemoveUser(&left.user_id.0.to_string());
                         }
                         _ => {}
                 }
@@ -162,29 +184,84 @@ impl EventHandler for VoiceReceiver {
         async fn act(&self, ctx: &EventContext<'_>) -> Option<Event> {
                 let EventContext::VoiceTick(tick) = ctx else { return None };
                 if !self._isListening.load(Ordering::Relaxed) { return None; }
-                let users = self._ssrcUsers.lock().unwrap();
+                let streams = self._streams.lock().unwrap();
+                let mut skipped = self._skipped.lock().unwrap();
                 for (ssrc, data) in &tick.speaking {
-                        self.Forward(&users, *ssrc, data);
+                        if !isOpus(data) {
+                                skipped.Count(streams.DescribeStream(*ssrc));
+                                continue;
+                        }
+                        self.Forward(&streams, *ssrc, data);
                 }
+                skipped.LogIfDue();
                 None
         }
 }
 
 impl VoiceReceiver {
-        // Give one speaker's frame to the bridge. Skip unknown streams, bridge
-        // bots, and frames that are digital silence.
-        fn Forward(
-                &self,
-                users: &HashMap<u32, String>,
-                ssrc: u32,
-                data: &VoiceData,
-        ) {
-                let Some(user) = users.get(&ssrc) else { return };
+        // Give one speaker's audio frame to the bridge. Skip streams that are
+        // not the audio stream of a user, bridge bots, and digital silence.
+        fn Forward(&self, streams: &StreamMap, ssrc: u32, data: &VoiceData) {
+                let Some(user) = streams.getAudioUser(ssrc) else { return };
                 if self._ownBotIds.contains(user) { return; }
                 let Some(pcm) = &data.decoded_voice else { return };
                 let frame = AudioFrame::FromDecoded(pcm);
                 if frame.isSilent() { return; }
                 let _ = self._heard.try_send((user.clone(), frame));
+        }
+}
+
+// ============================================================================
+// Streams and Skipped Packets
+// ============================================================================
+
+impl StreamMap {
+        // Return the user of a stream, but only if it is the audio stream of
+        // that user. An older stream of the same user is not audio now.
+        fn getAudioUser(&self, ssrc: u32) -> Option<&String> {
+                let user = self._streamUsers.get(&ssrc)?;
+                let audio = self._audioStreams.get(user);
+                (audio == Some(&ssrc)).then_some(user)
+        }
+
+        // Name a stream for the log: its user, or its number if unknown.
+        fn DescribeStream(&self, ssrc: u32) -> String {
+                match self._streamUsers.get(&ssrc) {
+                        Some(user) => format!("user {user}"),
+                        None => format!("stream {ssrc}"),
+                }
+        }
+
+        // Record the stream that a user names when they start to speak. It
+        // replaces the older audio stream of that user.
+        fn SetAudioStream(&mut self, ssrc: u32, user: String) {
+                self._streamUsers.insert(ssrc, user.clone());
+                self._audioStreams.insert(user, ssrc);
+        }
+
+        fn RemoveUser(&mut self, user: &str) {
+                self._streamUsers.retain(|_, u| u != user);
+                self._audioStreams.remove(user);
+        }
+}
+
+impl SkipReport {
+        fn New() -> Self {
+                Self { _counts: HashMap::new(), _lastReport: Instant::now() }
+        }
+
+        fn Count(&mut self, source: String) {
+                *self._counts.entry(source).or_default() += 1;
+        }
+
+        // Write the counts and start again, if the interval has passed.
+        fn LogIfDue(&mut self) {
+                if self._counts.is_empty() { return; }
+                if self._lastReport.elapsed() < SKIP_REPORT_INTERVAL { return; }
+                for (source, count) in self._counts.drain() {
+                        info!(%source, count, "skipped non-audio packets");
+                }
+                self._lastReport = Instant::now();
         }
 }
 
@@ -326,20 +403,33 @@ fn ParseId(value: &str) -> Result<NonZeroU64> {
                 .with_context(|| format!("\"{value}\" is not a Discord ID"))
 }
 
+// Return true if the packet behind a frame is Opus audio. A lost packet has
+// no header, and its frame continues the audio stream of its user.
+fn isOpus(data: &VoiceData) -> bool {
+        let Some(rtp) = &data.packet else { return true };
+        ReadPayloadType(&rtp.packet) == Some(OPUS_PAYLOAD_TYPE)
+}
+
+// The payload type is the low 7 bits of the second byte of an RTP header.
+fn ReadPayloadType(packet: &[u8]) -> Option<u8> {
+        packet.get(1).map(|byte| byte & 0x7F)
+}
+
 fn AddReceiveEvents(
         driver: &mut Driver,
         target: &VoiceTarget,
         is_listening: Arc<AtomicBool>,
 ) {
-        let ssrc_users = Arc::new(Mutex::new(HashMap::new()));
+        let streams = Arc::new(Mutex::new(StreamMap::default()));
         let events =
                 [CoreEvent::SpeakingStateUpdate, CoreEvent::ClientDisconnect];
         for event in events {
-                let tracker = SsrcTracker { _ssrcUsers: ssrc_users.clone() };
+                let tracker = SsrcTracker { _streams: streams.clone() };
                 driver.add_global_event(Event::Core(event), tracker);
         }
         let receiver = VoiceReceiver {
-                _ssrcUsers: ssrc_users,
+                _streams: streams,
+                _skipped: Mutex::new(SkipReport::New()),
                 _ownBotIds: target.getOwnBotIds(),
                 _isListening: is_listening,
                 _heard: target.getHeard(),
@@ -442,5 +532,29 @@ mod tests {
                 assert_eq!(bytes.len(), PLAYBACK_PREBUFFER * FRAME_LEN * 4);
                 assert_eq!(&bytes[..4], &0.5f32.to_le_bytes());
                 assert_eq!(ReadAll(&mut source, 1000).len(), 0);
+        }
+
+        #[test]
+        fn PayloadTypeIgnoresMarkerBit() {
+                // Version 2 header. The marker bit (0x80) is set on the
+                // first packet after silence and is not part of the type.
+                assert_eq!(ReadPayloadType(&[0x80, 120]), Some(120));
+                assert_eq!(ReadPayloadType(&[0x80, 0x80 | 120]), Some(120));
+                assert_eq!(ReadPayloadType(&[0x80, 101]), Some(101));
+                assert_eq!(ReadPayloadType(&[0x80]), None);
+        }
+
+        #[test]
+        fn OnlyTheNewestAudioStreamIsAudio() {
+                let mut streams = StreamMap::default();
+                let user = "u".to_string();
+                streams.SetAudioStream(1, user.clone());
+                assert_eq!(streams.getAudioUser(1), Some(&user));
+                streams.SetAudioStream(2, user.clone());
+                assert_eq!(streams.getAudioUser(1), None);
+                assert_eq!(streams.getAudioUser(2), Some(&user));
+                assert_eq!(streams.getAudioUser(3), None);
+                streams.RemoveUser("u");
+                assert_eq!(streams.getAudioUser(2), None);
         }
 }
