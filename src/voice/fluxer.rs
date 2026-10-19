@@ -47,6 +47,7 @@ const GAP_LIMIT: Duration = Duration::from_millis(40);
 // A bot in a Fluxer voice channel.
 pub struct FluxerVoice {
         _room: Arc<Room>,
+        _trackSid: TrackSid,
         _output: mpsc::Sender<AudioFrame>,
         _receive: Arc<ReceiveState>,
         _isConnected: Arc<AtomicBool>,
@@ -83,7 +84,15 @@ impl FluxerVoice {
                         Room::connect(url, server.getToken(), options).await?;
                 let room = Arc::new(room);
                 info!(url, bot = %target.getBotId(), "joined Fluxer voice");
-                let source = PublishTrack(&room).await?;
+                let (source, track_sid) = match PublishTrack(&room).await {
+                        Ok(published) => published,
+                        Err(e) => {
+                                // Close the room, so that no connection stays
+                                // open for a bot that never got audio.
+                                let _ = room.close().await;
+                                return Err(e);
+                        }
+                };
                 let (output_tx, output_rx) = mpsc::channel(SEND_QUEUE);
                 tokio::spawn(RunPublisher(
                         source,
@@ -99,6 +108,7 @@ impl FluxerVoice {
                 ));
                 Ok(Self {
                         _room: room,
+                        _trackSid: track_sid,
                         _output: output_tx,
                         _receive: receive,
                         _isConnected: is_connected,
@@ -126,9 +136,18 @@ impl FluxerVoice {
                 }
         }
 
-        // Leave the room. Without this, the bot stays in the channel list
-        // until LiveKit times out.
+        // Stop the audio track, then leave the room. LiveKit expects the
+        // tracks to stop before the room closes. A room that closes with a
+        // live track can try to negotiate on a connection that is closed.
+        // Without the leave, the bot stays in the channel list until
+        // LiveKit times out.
         pub async fn Close(self) {
+                drop(self._output);
+                let participant = self._room.local_participant();
+                let stopped = participant.unpublish_track(&self._trackSid);
+                if let Err(e) = stopped.await {
+                        debug!(error = %e, "cannot stop the audio track");
+                }
                 if let Err(e) = self._room.close().await {
                         warn!(error = %e, "cannot close LiveKit room");
                 }
@@ -170,8 +189,9 @@ impl ReceiveState {
 // ============================================================================
 
 // Turn off echo cancellation, noise suppression, and gain control. They are
-// for microphones and damage audio that is already clean.
-async fn PublishTrack(room: &Room) -> Result<NativeAudioSource> {
+// for microphones and damage audio that is already clean. Return the source
+// and the track ID, which Close needs to stop the track.
+async fn PublishTrack(room: &Room) -> Result<(NativeAudioSource, TrackSid)> {
         let options = AudioSourceOptions {
                 echo_cancellation: false,
                 noise_suppression: false,
@@ -193,10 +213,11 @@ async fn PublishTrack(room: &Room) -> Result<NativeAudioSource> {
                 dtx: true,
                 ..Default::default()
         };
-        room.local_participant()
+        let publication = room
+                .local_participant()
                 .publish_track(LocalTrack::Audio(track), options)
                 .await?;
-        Ok(source)
+        Ok((source, publication.sid()))
 }
 
 // Publish only while frames arrive. After the hangover the track goes idle
@@ -280,7 +301,7 @@ async fn RunRoomEvents(
                                 StartTrackReader(track, &participant, &receive);
                         }
                         RoomEvent::Disconnected { reason } => {
-                                warn!(?reason, "Fluxer voice disconnected");
+                                LogDisconnect(reason);
                                 break;
                         }
                         _ => {}
@@ -342,6 +363,16 @@ async fn RunTrackReader(
 // ============================================================================
 // Helper Functions
 // ============================================================================
+
+// A disconnect that the bridge asked for is normal. Any other reason means
+// that the connection was lost.
+fn LogDisconnect(reason: livekit::DisconnectReason) {
+        if reason == livekit::DisconnectReason::ClientInitiated {
+                info!("Fluxer voice closed");
+        } else {
+                warn!(?reason, "Fluxer voice disconnected");
+        }
+}
 
 fn SetAudioSubscribed(participant: &RemoteParticipant, is_subscribed: bool) {
         for publication in participant.track_publications().values() {

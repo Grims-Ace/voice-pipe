@@ -299,10 +299,16 @@ ExecStart=/opt/voice-pipe/voice-pipe /opt/voice-pipe/config.toml
 Restart=on-failure
 RestartSec=10
 User=voice-pipe
+LimitNOFILE=65536
 
 [Install]
 WantedBy=multi-user.target
 ```
+
+`LimitNOFILE` is necessary. Each Fluxer bot holds two WebRTC connections
+with many sockets, and each Discord bot holds its own connections. The
+systemd default of 1024 open files is too low for a few bots, and joins
+then fail with "Too many open files".
 
 ```sh
 sudo systemctl daemon-reload

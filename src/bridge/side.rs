@@ -38,6 +38,10 @@ const MAIN_RETRY_DELAY: Duration = Duration::from_secs(30);
 // Time that enough proxies must be free before a group goes back to single
 // proxies, so that bots do not leave and join again and again.
 const SPLIT_DELAY: Duration = Duration::from_secs(10);
+// Time that a proxy stays after its user leaves. A user whose app connects
+// again comes back within a second or two, and a new proxy costs a leave,
+// a join, and a name change.
+const LEAVE_GRACE: Duration = Duration::from_secs(3);
 
 // ============================================================================
 // Types
@@ -74,6 +78,7 @@ pub struct Side {
         _target: VoiceTarget,
         _proxies: HashMap<String, ProxySession>,
         _opening: HashSet<String>,
+        _leavingSince: HashMap<String, Instant>,
         _userFlags: HashMap<String, VoiceFlags>,
         _group: Option<GroupBot>,
         _groupUsers: HashSet<String>,
@@ -195,6 +200,7 @@ impl Side {
                         _target: target,
                         _proxies: HashMap::new(),
                         _opening: HashSet::new(),
+                        _leavingSince: HashMap::new(),
                         _userFlags: HashMap::new(),
                         _group: None,
                         _groupUsers: HashSet::new(),
@@ -304,6 +310,8 @@ impl Side {
         pub async fn Close(mut self) {
                 self.StopListening();
                 let mut tasks: Vec<JoinHandle<()>> = Vec::new();
+                let leaving = self._leavingSince.drain().count();
+                self.getPlatformHub().RemoveLeavingProxies(leaving);
                 let sessions: Vec<ProxySession> =
                         self._proxies.drain().map(|(_, s)| s).collect();
                 for session in sessions {
@@ -335,12 +343,20 @@ impl Side {
 
         // Give each user a proxy. Start a group bot when proxies run out. Do
         // not open proxies that the group bot would make leave at once.
+        // Proxies that wait out their leave grace are free soon, so wait for
+        // them, because a user that moves to another channel must not make
+        // that channel start a group bot.
         fn SyncSingles(&mut self, users: &HashSet<String>) {
                 let lacking =
                         users.iter().filter(|u| !self.hasProxy(u)).count();
-                let free = self.getPlatformHub().CountFreeProxies();
-                if lacking <= free && self.OpenProxies(users, 0) { return; }
-                self.StartGroup();
+                let hub = self.getPlatformHub();
+                let free = hub.CountFreeProxies();
+                let soon_free = free + hub.CountLeavingProxies();
+                if lacking > soon_free {
+                        self.StartGroup();
+                        return;
+                }
+                self.OpenProxies(users, 0);
         }
 
         // Open a single proxy for each user that has none, but leave
@@ -417,8 +433,16 @@ impl Side {
                 }
         }
 
-        // Close the proxies of users that left the linked channel.
+        // Close the proxies of users that left the linked channel, after the
+        // leave grace. Keep the proxy of a user that came back in time.
         fn RemoveDeparted(&mut self, users: &HashSet<String>) {
+                let returned: Vec<String> = self
+                        ._leavingSince
+                        .keys()
+                        .filter(|u| users.contains(*u))
+                        .cloned()
+                        .collect();
+                for user in returned { self.ForgetLeaving(&user); }
                 let departed: Vec<String> = self
                         ._proxies
                         .keys()
@@ -426,6 +450,8 @@ impl Side {
                         .cloned()
                         .collect();
                 for user in departed {
+                        let since = self.MarkLeaving(&user);
+                        if since.elapsed() < LEAVE_GRACE { continue; }
                         info!(
                                 platform = %self._platform,
                                 %user,
@@ -433,6 +459,23 @@ impl Side {
                         );
                         self.RemoveProxy(&user);
                 }
+        }
+
+        // Start the leave grace of a user, and return when it started. The
+        // hub counts these proxies, because they are free soon.
+        fn MarkLeaving(&mut self, user: &str) -> Instant {
+                if let Some(since) = self._leavingSince.get(user) {
+                        return *since;
+                }
+                let now = Instant::now();
+                self._leavingSince.insert(user.to_string(), now);
+                self.getPlatformHub().AddLeavingProxy();
+                now
+        }
+
+        fn ForgetLeaving(&mut self, user: &str) {
+                if self._leavingSince.remove(user).is_none() { return; }
+                self.getPlatformHub().RemoveLeavingProxies(1);
         }
 
         // Close all single proxies, because the group bot speaks for their
@@ -451,9 +494,17 @@ impl Side {
 
         // Close the single proxy of a user and give it back to the pool.
         fn RemoveProxy(&mut self, user: &str) {
-                self.StopListeningTo(&Listener::Proxy(user.to_string()));
-                let Some(session) = self._proxies.remove(user) else { return };
+                let Some(session) = self.TakeProxy(user) else { return };
                 self.SpawnProxyClose(session);
+        }
+
+        // Take the single proxy of a user out of this side. This is the only
+        // way out of `_proxies` (other than Close), so that the listener and
+        // the leave grace never point at a proxy that is gone.
+        fn TakeProxy(&mut self, user: &str) -> Option<ProxySession> {
+                self.StopListeningTo(&Listener::Proxy(user.to_string()));
+                self.ForgetLeaving(user);
+                self._proxies.remove(user)
         }
 
         // Close a proxy in the background and give its account to the pool.
@@ -538,8 +589,7 @@ impl Side {
                 else {
                         return false;
                 };
-                self.StopListeningTo(&Listener::Proxy(user.clone()));
-                let Some(mut session) = self._proxies.remove(&user) else {
+                let Some(mut session) = self.TakeProxy(&user) else {
                         return false;
                 };
                 // A group is many people, so the group bot never shows the

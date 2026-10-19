@@ -7,7 +7,7 @@
 // ============================================================================
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -47,6 +47,7 @@ pub struct PlatformHub {
         _rest: RestClient,
         _botIds: Arc<HashSet<String>>,
         _proxies: Mutex<ProxyPool>,
+        _leavingProxies: AtomicUsize,
         _mainLink: Mutex<Option<LinkKey>>,
 }
 
@@ -78,6 +79,20 @@ impl PlatformHub {
         // Return the link that the main bot is in, if any.
         pub fn getMainLink(&self) -> Option<LinkKey> {
                 self._mainLink.lock().unwrap().clone()
+        }
+
+        // Return the number of proxies whose user left and that wait out
+        // the leave grace. These proxies are free soon.
+        pub fn CountLeavingProxies(&self) -> usize {
+                self._leavingProxies.load(Ordering::Relaxed)
+        }
+
+        pub fn AddLeavingProxy(&self) {
+                self._leavingProxies.fetch_add(1, Ordering::Relaxed);
+        }
+
+        pub fn RemoveLeavingProxies(&self, count: usize) {
+                self._leavingProxies.fetch_sub(count, Ordering::Relaxed);
         }
 
         // Return (free, held, total) proxy counts.
@@ -149,6 +164,7 @@ impl PlatformHub {
                         _rest: rest,
                         _botIds: Arc::new(bot_ids),
                         _proxies: Mutex::new(ProxyPool::New(proxies)),
+                        _leavingProxies: AtomicUsize::new(0),
                         _mainLink: Mutex::new(None),
                 })
         }

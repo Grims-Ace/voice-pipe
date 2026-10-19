@@ -197,10 +197,18 @@ impl EventHandler for ConnectionMonitor {
                                 self._isConnected
                                         .store(true, Ordering::Relaxed);
                         }
-                        EventContext::DriverDisconnect(_) => {
+                        // Songbird gives no reason when the bridge asked
+                        // for the disconnect, which is normal.
+                        EventContext::DriverDisconnect(data) => {
                                 self._isConnected
                                         .store(false, Ordering::Relaxed);
-                                warn!("Discord voice disconnected");
+                                match &data.reason {
+                                        None => info!("Discord voice closed"),
+                                        Some(reason) => warn!(
+                                                ?reason,
+                                                "Discord voice disconnected",
+                                        ),
+                                }
                         }
                         _ => {}
                 }
