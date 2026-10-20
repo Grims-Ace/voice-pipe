@@ -10,12 +10,12 @@ use std::io::{Read, Seek, SeekFrom};
 use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use songbird::driver::{DecodeConfig, DecodeMode, Driver};
-use songbird::events::context_data::VoiceData;
+use songbird::events::context_data::{DisconnectReason, VoiceData};
 use songbird::events::{CoreEvent, Event, EventContext, EventHandler};
 use songbird::id::{ChannelId, GuildId, UserId};
 use songbird::input::{Input, RawAdapter};
@@ -26,7 +26,7 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use super::{SEND_QUEUE, SpeakerFrame, VoiceTarget};
-use crate::audio::{AudioFrame, CHANNELS, FRAME_LEN, SAMPLE_RATE};
+use crate::audio::{AudioFrame, CHANNELS, FRAME_LEN, SAMPLE_RATE, TakeFrames};
 use crate::gateway::VoiceServer;
 
 // ============================================================================
@@ -39,12 +39,6 @@ const PLAYBACK_PREBUFFER: usize = 3;
 // Remove the oldest frames above this depth, so that delay cannot grow
 // (about 240 ms).
 const PLAYBACK_MAX_DEPTH: usize = 12;
-// RTP payload type of Opus audio on Discord. A camera sends video with other
-// payload types on the same connection, and video decoded as audio is noise.
-const OPUS_PAYLOAD_TYPE: u8 = 120;
-// Shortest time between two reports of skipped packets, so that a camera
-// that stays on does not fill the log.
-const SKIP_REPORT_INTERVAL: Duration = Duration::from_secs(60);
 
 // ============================================================================
 // Types
@@ -73,17 +67,12 @@ struct SsrcTracker {
         _streams: Arc<Mutex<StreamMap>>,
 }
 
-// Counts the packets that were skipped because they are not audio, and
-// writes the counts to the log at most once each report interval.
-struct SkipReport {
-        _counts: HashMap<String, u64>,
-        _lastReport: Instant,
-}
-
 // Gives the audio of each speaker to the bridge while the bot listens.
+// `_pending` keeps the part of each speaker's audio that is shorter than one
+// frame, until their next packet completes it.
 struct VoiceReceiver {
         _streams: Arc<Mutex<StreamMap>>,
-        _skipped: Mutex<SkipReport>,
+        _pending: Mutex<HashMap<String, Vec<i16>>>,
         _ownBotIds: Arc<HashSet<String>>,
         _isListening: Arc<AtomicBool>,
         _heard: mpsc::Sender<SpeakerFrame>,
@@ -185,34 +174,40 @@ impl EventHandler for VoiceReceiver {
                 let EventContext::VoiceTick(tick) = ctx else { return None };
                 if !self._isListening.load(Ordering::Relaxed) { return None; }
                 let streams = self._streams.lock().unwrap();
-                let mut skipped = self._skipped.lock().unwrap();
+                let mut pending = self._pending.lock().unwrap();
                 for (ssrc, data) in &tick.speaking {
-                        if !isOpus(data) {
-                                skipped.Count(streams.DescribeStream(*ssrc));
-                                continue;
-                        }
-                        self.Forward(&streams, *ssrc, data);
+                        self.Forward(&streams, &mut pending, *ssrc, data);
                 }
-                skipped.LogIfDue();
                 None
         }
 }
 
 impl VoiceReceiver {
-        // Give one speaker's audio frame to the bridge. Skip streams that are
-        // not the audio stream of a user, bridge bots, and digital silence.
-        fn Forward(&self, streams: &StreamMap, ssrc: u32, data: &VoiceData) {
+        // Give all of one speaker's decoded audio to the bridge in 20 ms
+        // frames. A packet can hold more than one frame: the web client and
+        // Vesktop send 40 or 60 ms packets when a camera uses the bandwidth.
+        // Skip streams that are not the audio stream of a user, bridge bots,
+        // and digital silence.
+        fn Forward(
+                &self,
+                streams: &StreamMap,
+                pending: &mut HashMap<String, Vec<i16>>,
+                ssrc: u32,
+                data: &VoiceData,
+        ) {
                 let Some(user) = streams.getAudioUser(ssrc) else { return };
                 if self._ownBotIds.contains(user) { return; }
                 let Some(pcm) = &data.decoded_voice else { return };
-                let frame = AudioFrame::FromDecoded(pcm);
-                if frame.isSilent() { return; }
-                let _ = self._heard.try_send((user.clone(), frame));
+                let rest = pending.entry(user.clone()).or_default();
+                for frame in TakeFrames(rest, pcm) {
+                        if frame.isSilent() { continue; }
+                        let _ = self._heard.try_send((user.clone(), frame));
+                }
         }
 }
 
 // ============================================================================
-// Streams and Skipped Packets
+// Audio Streams
 // ============================================================================
 
 impl StreamMap {
@@ -222,14 +217,6 @@ impl StreamMap {
                 let user = self._streamUsers.get(&ssrc)?;
                 let audio = self._audioStreams.get(user);
                 (audio == Some(&ssrc)).then_some(user)
-        }
-
-        // Name a stream for the log: its user, or its number if unknown.
-        fn DescribeStream(&self, ssrc: u32) -> String {
-                match self._streamUsers.get(&ssrc) {
-                        Some(user) => format!("user {user}"),
-                        None => format!("stream {ssrc}"),
-                }
         }
 
         // Record the stream that a user names when they start to speak. It
@@ -245,26 +232,6 @@ impl StreamMap {
         }
 }
 
-impl SkipReport {
-        fn New() -> Self {
-                Self { _counts: HashMap::new(), _lastReport: Instant::now() }
-        }
-
-        fn Count(&mut self, source: String) {
-                *self._counts.entry(source).or_default() += 1;
-        }
-
-        // Write the counts and start again, if the interval has passed.
-        fn LogIfDue(&mut self) {
-                if self._counts.is_empty() { return; }
-                if self._lastReport.elapsed() < SKIP_REPORT_INTERVAL { return; }
-                for (source, count) in self._counts.drain() {
-                        info!(%source, count, "skipped non-audio packets");
-                }
-                self._lastReport = Instant::now();
-        }
-}
-
 #[async_trait]
 impl EventHandler for ConnectionMonitor {
         async fn act(&self, ctx: &EventContext<'_>) -> Option<Event> {
@@ -274,18 +241,10 @@ impl EventHandler for ConnectionMonitor {
                                 self._isConnected
                                         .store(true, Ordering::Relaxed);
                         }
-                        // Songbird gives no reason when the bridge asked
-                        // for the disconnect, which is normal.
                         EventContext::DriverDisconnect(data) => {
                                 self._isConnected
                                         .store(false, Ordering::Relaxed);
-                                match &data.reason {
-                                        None => info!("Discord voice closed"),
-                                        Some(reason) => warn!(
-                                                ?reason,
-                                                "Discord voice disconnected",
-                                        ),
-                                }
+                                LogDisconnect(data.reason);
                         }
                         _ => {}
                 }
@@ -403,16 +362,15 @@ fn ParseId(value: &str) -> Result<NonZeroU64> {
                 .with_context(|| format!("\"{value}\" is not a Discord ID"))
 }
 
-// Return true if the packet behind a frame is Opus audio. A lost packet has
-// no header, and its frame continues the audio stream of its user.
-fn isOpus(data: &VoiceData) -> bool {
-        let Some(rtp) = &data.packet else { return true };
-        ReadPayloadType(&rtp.packet) == Some(OPUS_PAYLOAD_TYPE)
-}
-
-// The payload type is the low 7 bits of the second byte of an RTP header.
-fn ReadPayloadType(packet: &[u8]) -> Option<u8> {
-        packet.get(1).map(|byte| byte & 0x7F)
+// A disconnect that the bridge asked for (`Requested`) is normal. Any other
+// reason means that the connection was lost.
+fn LogDisconnect(reason: Option<DisconnectReason>) {
+        match reason {
+                None | Some(DisconnectReason::Requested) => {
+                        info!("Discord voice closed")
+                }
+                Some(reason) => warn!(?reason, "Discord voice disconnected"),
+        }
 }
 
 fn AddReceiveEvents(
@@ -429,7 +387,7 @@ fn AddReceiveEvents(
         }
         let receiver = VoiceReceiver {
                 _streams: streams,
-                _skipped: Mutex::new(SkipReport::New()),
+                _pending: Mutex::new(HashMap::new()),
                 _ownBotIds: target.getOwnBotIds(),
                 _isListening: is_listening,
                 _heard: target.getHeard(),
@@ -532,16 +490,6 @@ mod tests {
                 assert_eq!(bytes.len(), PLAYBACK_PREBUFFER * FRAME_LEN * 4);
                 assert_eq!(&bytes[..4], &0.5f32.to_le_bytes());
                 assert_eq!(ReadAll(&mut source, 1000).len(), 0);
-        }
-
-        #[test]
-        fn PayloadTypeIgnoresMarkerBit() {
-                // Version 2 header. The marker bit (0x80) is set on the
-                // first packet after silence and is not part of the type.
-                assert_eq!(ReadPayloadType(&[0x80, 120]), Some(120));
-                assert_eq!(ReadPayloadType(&[0x80, 0x80 | 120]), Some(120));
-                assert_eq!(ReadPayloadType(&[0x80, 101]), Some(101));
-                assert_eq!(ReadPayloadType(&[0x80]), None);
         }
 
         #[test]

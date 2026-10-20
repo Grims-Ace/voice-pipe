@@ -62,27 +62,6 @@ impl AudioFrame {
                 frame
         }
 
-        // Copy mono samples into both stereo channels.
-        pub fn FromMono(src: &[i16]) -> Self {
-                let mut frame = Self::Silence();
-                let len = src.len().min(SAMPLES_PER_CHANNEL);
-                for (i, &s) in src[..len].iter().enumerate() {
-                        frame._samples[i * 2] = s;
-                        frame._samples[i * 2 + 1] = s;
-                }
-                frame
-        }
-
-        // Make a frame from decoded audio of unknown channel count. A full
-        // stereo frame has FRAME_LEN samples, so shorter input is mono.
-        pub fn FromDecoded(src: &[i16]) -> Self {
-                if src.len() >= FRAME_LEN {
-                        Self::FromStereo(src)
-                } else {
-                        Self::FromMono(src)
-                }
-        }
-
         // Write the samples as little-endian f32 bytes, the raw PCM format
         // that Songbird plays.
         pub fn WriteFloatBytes(&self, out: &mut Vec<u8>) {
@@ -93,6 +72,18 @@ impl AudioFrame {
                         );
                 }
         }
+}
+
+// Add decoded stereo audio to `pending` and take out every full 20 ms frame.
+// The rest stays in `pending` for the next packet of the same sender,
+// because a sender can use packets of 10, 20, 30, 40, 60, or 120 ms.
+pub fn TakeFrames(pending: &mut Vec<i16>, pcm: &[i16]) -> Vec<AudioFrame> {
+        pending.extend_from_slice(pcm);
+        let (chunks, _) = pending.as_chunks::<FRAME_LEN>();
+        let frames: Vec<AudioFrame> =
+                chunks.iter().map(|c| AudioFrame::FromArray(*c)).collect();
+        pending.drain(..frames.len() * FRAME_LEN);
+        frames
 }
 
 impl fmt::Debug for AudioFrame {
@@ -119,9 +110,30 @@ mod tests {
         }
 
         #[test]
-        fn FromMonoCopiesToBothChannels() {
-                let frame = AudioFrame::FromMono(&[500, -250]);
-                assert_eq!(&frame.getSamples()[..4], &[500, 500, -250, -250]);
+        fn LongPacketGivesAllFrames() {
+                // A 60 ms packet is three frames, in order.
+                let mut pending = Vec::new();
+                let mut pcm = vec![1; FRAME_LEN];
+                pcm.extend(vec![2; FRAME_LEN]);
+                pcm.extend(vec![3; FRAME_LEN]);
+                let frames = TakeFrames(&mut pending, &pcm);
+                assert_eq!(frames.len(), 3);
+                assert_eq!(frames[2].getSamples()[0], 3);
+                assert!(pending.is_empty());
+        }
+
+        #[test]
+        fn ShortPacketWaitsForTheNext() {
+                // 30 ms then 10 ms: one frame, then the 20 ms rest.
+                let mut pending = Vec::new();
+                let frames = TakeFrames(&mut pending, &[5; FRAME_LEN * 3 / 2]);
+                assert_eq!(frames.len(), 1);
+                assert_eq!(pending.len(), FRAME_LEN / 2);
+                let frames = TakeFrames(&mut pending, &[6; FRAME_LEN / 2]);
+                assert_eq!(frames.len(), 1);
+                assert_eq!(frames[0].getSamples()[0], 5);
+                assert_eq!(frames[0].getSamples()[FRAME_LEN - 1], 6);
+                assert!(pending.is_empty());
         }
 
         #[test]
