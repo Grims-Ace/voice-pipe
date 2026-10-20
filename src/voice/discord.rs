@@ -93,13 +93,19 @@ struct ReceiveStats {
 }
 
 // The peak, the loudness, and the clipped samples of decoded audio. Only
-// numbers are kept, never the audio.
+// numbers are kept, never the audio. The channel sums give the correlation
+// of the left and right channels: a mono microphone gives two equal
+// channels, and channels that differ can cancel when Fluxer mixes them to
+// one channel.
 #[derive(Default)]
 struct LevelStats {
         _peak: u16,
         _clippedSamples: u64,
         _sumOfSquares: f64,
         _sampleCount: u64,
+        _sumLeftRight: f64,
+        _sumLeftSquares: f64,
+        _sumRightSquares: f64,
 }
 
 // What the receiver keeps for one speaker. `_pending` is the part of their
@@ -298,6 +304,7 @@ impl ReceiveStats {
                         peak = self._levels._peak,
                         clipped = self._levels._clippedSamples,
                         rms = self._levels.getRms(),
+                        stereo = %self._levels.DescribeStereo(),
                         "receive report",
                 );
                 let last = self._lastSequence;
@@ -313,8 +320,27 @@ impl LevelStats {
                 mean.sqrt().round() as u32
         }
 
+        // Return the correlation of the left and right channels, from -1 to
+        // 1. Equal channels give 1, and one inverted channel gives -1.
+        // Return None when a channel is silent, because then there is no
+        // correlation.
+        fn getStereoCorrelation(&self) -> Option<f64> {
+                let energy = self._sumLeftSquares * self._sumRightSquares;
+                if energy <= 0.0 { return None; }
+                Some(self._sumLeftRight / energy.sqrt())
+        }
+
+        // Write the correlation for the report, with two decimals.
+        fn DescribeStereo(&self) -> String {
+                match self.getStereoCorrelation() {
+                        Some(value) => format!("{value:.2}"),
+                        None => "none".to_string(),
+                }
+        }
+
         // Count the samples of one decoded block. A sample at the largest
-        // or smallest 16-bit value is clipped.
+        // or smallest 16-bit value is clipped. The block is interleaved
+        // stereo (left, right, left, right, ...).
         fn Record(&mut self, pcm: &[i16]) {
                 const FULL_SCALE: u16 = i16::MAX as u16;
                 for &sample in pcm {
@@ -324,6 +350,13 @@ impl LevelStats {
                         self._sumOfSquares += f64::from(sample).powi(2);
                 }
                 self._sampleCount += pcm.len() as u64;
+                let (pairs, _) = pcm.as_chunks::<2>();
+                for [left, right] in pairs {
+                        let (l, r) = (f64::from(*left), f64::from(*right));
+                        self._sumLeftRight += l * r;
+                        self._sumLeftSquares += l * l;
+                        self._sumRightSquares += r * r;
+                }
         }
 }
 
@@ -637,6 +670,26 @@ mod tests {
                 assert_eq!(CountMissing(10, 5000), 0);
                 let header = [0x80, 120, 0x12, 0x34];
                 assert_eq!(ReadSequence(&header), Some(0x1234));
+        }
+
+        #[test]
+        fn StereoCorrelationShowsHowChannelsDiffer() {
+                let correlation = |pcm: &[i16]| {
+                        let mut levels = LevelStats::default();
+                        levels.Record(pcm);
+                        levels.getStereoCorrelation()
+                };
+                // Mono microphone: both channels are equal.
+                let mono = correlation(&[100, 100, -300, -300, 50, 50]);
+                assert!((mono.unwrap() - 1.0).abs() < 1e-9);
+                // One channel is inverted.
+                let inverted = correlation(&[100, -100, -300, 300]);
+                assert!((inverted.unwrap() + 1.0).abs() < 1e-9);
+                // One channel is silent: no correlation.
+                assert_eq!(correlation(&[100, 0, -300, 0]), None);
+                let mut silent = LevelStats::default();
+                silent.Record(&[0, 0]);
+                assert_eq!(silent.DescribeStereo(), "none");
         }
 
         #[test]
