@@ -20,12 +20,13 @@ use livekit::webrtc::audio_source::native::NativeAudioSource;
 use livekit::webrtc::audio_stream::native::NativeAudioStream;
 use livekit::webrtc::prelude::{AudioFrame as RtcFrame, AudioSourceOptions};
 use tokio::sync::mpsc;
+use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
 use super::{SEND_QUEUE, SpeakerFrame, VoiceTarget};
 use crate::audio::{
-        AudioFrame, CHANNELS, FRAME_LEN, SAMPLE_RATE, SAMPLES_PER_CHANNEL,
-        mixer,
+        AudioFrame, CHANNELS, FRAME_LEN, FRAME_TIME, SAMPLE_RATE,
+        SAMPLES_PER_CHANNEL, mixer,
 };
 use crate::gateway::VoiceServer;
 
@@ -36,9 +37,12 @@ use crate::gateway::VoiceServer;
 // Audio that LiveKit can hold before a capture waits (must be a multiple of
 // 10 ms).
 const SOURCE_QUEUE_MS: u32 = 100;
-// Longest gap between frames before the publisher adds silence, so that
-// short gaps in speech do not reset the jitter buffer of the listeners.
-const GAP_LIMIT: Duration = Duration::from_millis(40);
+// Time that the queued audio may run out before the publisher adds silence,
+// so that short gaps in speech do not reset the jitter buffer of the
+// listeners. The publisher measures from the end of the queued audio, not
+// from the last frame, because frames can come in bursts (a 60 ms packet is
+// three frames at once).
+const GAP_MARGIN: Duration = Duration::from_millis(20);
 
 // ============================================================================
 // Types
@@ -237,25 +241,32 @@ async fn RunPublisher(
 }
 
 // Publish frames and fill short gaps with silence until no audio comes for
-// the hangover time. Return false when the output queue closes.
+// the hangover time. The caller has just captured one frame. Silence is
+// added only when the queued audio has played out, so that a burst of
+// frames is never cut up with silence. Return false when the output queue
+// closes.
 async fn PublishUntilQuiet(
         source: &NativeAudioSource,
         output: &mut mpsc::Receiver<AudioFrame>,
         hangover: Duration,
 ) -> bool {
+        let mut queued_until = Instant::now() + FRAME_TIME;
         let mut quiet = Duration::ZERO;
         while quiet < hangover {
-                match tokio::time::timeout(GAP_LIMIT, output.recv()).await {
+                let deadline = queued_until + GAP_MARGIN;
+                let next = tokio::time::timeout_at(deadline, output.recv());
+                match next.await {
                         Ok(Some(frame)) => {
                                 quiet = Duration::ZERO;
                                 Capture(source, &frame).await;
                         }
                         Ok(None) => return false,
                         Err(_) => {
-                                quiet += GAP_LIMIT;
+                                quiet += FRAME_TIME;
                                 Capture(source, &AudioFrame::Silence()).await;
                         }
                 }
+                queued_until = queued_until.max(Instant::now()) + FRAME_TIME;
         }
         true
 }

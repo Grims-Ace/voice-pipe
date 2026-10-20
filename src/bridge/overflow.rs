@@ -11,7 +11,9 @@ use crate::audio::AudioFrame;
 use crate::audio::buffer::JitterBuffer;
 use crate::audio::mixer;
 
-// Remove a speaker after this many mix ticks without audio (100 ms).
+// Remove a speaker after this many mix ticks without new audio (100 ms),
+// but only when their buffer is empty. A sender with 120 ms packets sends
+// nothing for six ticks between packets, while the buffer still plays.
 const IDLE_TICKS_MAX: u8 = 5;
 
 // A jitter buffer for each overflow speaker, mixed on a 20 ms clock.
@@ -49,7 +51,9 @@ impl OverflowMixer {
                                 buffer.Pull()
                         })
                         .collect();
-                self._buffers.retain(|_, (_, idle)| *idle < IDLE_TICKS_MAX);
+                self._buffers.retain(|_, (buffer, idle)| {
+                        *idle < IDLE_TICKS_MAX || !buffer.isEmpty()
+                });
                 let mixed = mixer::Mix(&frames);
                 if mixed.isSilent() { None } else { Some(mixed) }
         }
@@ -77,6 +81,19 @@ mod tests {
                 mixer.Push("a", Tone(100));
                 mixer.Push("b", Tone(30));
                 assert_eq!(mixer.Pull().unwrap().getSamples()[0], 130);
+        }
+
+        #[test]
+        fn SpeakerWithQueuedAudioStays() {
+                // One 120 ms packet: six frames, then nothing for six ticks.
+                // All six must play, although the fifth tick passes the idle
+                // limit.
+                let mut mixer = OverflowMixer::New(1);
+                for i in 0..6 { mixer.Push("a", Tone(100 + i)); }
+                for i in 0..6 {
+                        let frame = mixer.Pull().expect("queued audio plays");
+                        assert_eq!(frame.getSamples()[0], 100 + i);
+                }
         }
 
         #[test]
