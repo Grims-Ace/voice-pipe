@@ -15,11 +15,11 @@ use futures_util::future::join_all;
 use tokio::sync::{mpsc, watch};
 use tracing::{info, warn};
 
+use super::chat::ChatCommands;
 use super::hub::Hub;
 use super::link::{LinkHandle, LinkKey, Occupancy};
 use super::matching::{self, ChannelPair};
-use super::status;
-use crate::commands::{self, Command};
+use super::status::LinkStatus;
 use crate::gateway::{ChatMessage, VoiceChannel};
 use crate::platform::{PLATFORMS, Platform};
 
@@ -27,9 +27,6 @@ use crate::platform::{PLATFORMS, Platform};
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(2);
 // Time that a link must be unwanted before it stops.
 const STOP_DELAY: Duration = Duration::from_secs(5);
-// Time that a user must wait between two commands, so that command spam
-// cannot push the main bot into API rate limits.
-const COMMAND_COOLDOWN: Duration = Duration::from_secs(3);
 
 // The owner of all link tasks.
 pub struct Coordinator {
@@ -38,24 +35,22 @@ pub struct Coordinator {
         _stopping: Vec<(LinkKey, LinkHandle)>,
         _unwantedSince: HashMap<LinkKey, Instant>,
         _warnedNames: HashSet<(Platform, String)>,
-        _lastCommands: HashMap<String, Instant>,
-        _messages: mpsc::Receiver<ChatMessage>,
+        _chat: ChatCommands,
+        _discordChat: mpsc::Receiver<ChatMessage>,
+        _fluxerChat: mpsc::Receiver<ChatMessage>,
 }
 
 impl Coordinator {
         pub fn New(hub: Arc<Hub>) -> Self {
-                let gateway = hub.getPlatform(Platform::Discord).getGateway();
-                let messages = gateway
-                        .TakeMessages()
-                        .unwrap_or_else(|| mpsc::channel(1).1);
                 Self {
+                        _discordChat: TakeMessages(&hub, Platform::Discord),
+                        _fluxerChat: TakeMessages(&hub, Platform::Fluxer),
+                        _chat: ChatCommands::New(hub.clone()),
                         _hub: hub,
                         _links: HashMap::new(),
                         _stopping: Vec::new(),
                         _unwantedSince: HashMap::new(),
                         _warnedNames: HashSet::new(),
-                        _lastCommands: HashMap::new(),
-                        _messages: messages,
                 }
         }
 
@@ -75,15 +70,22 @@ impl Coordinator {
                                         "a main bot gateway closed"
                                 ));
                         }
-                        tokio::select! {
+                        let heard = tokio::select! {
                                 _ = stop.wait_for(|stop| *stop) => break Ok(()),
-                                _ = discord.Changed() => {}
-                                _ = fluxer.Changed() => {}
-                                _ = tick.tick() => {}
-                                Some(message) = self._messages.recv() => {
-                                        self.HandleMessage(message)
+                                _ = discord.Changed() => None,
+                                _ = fluxer.Changed() => None,
+                                _ = tick.tick() => None,
+                                Some(m) = self._discordChat.recv() => {
+                                        Some((Platform::Discord, m))
                                 }
+                                Some(m) = self._fluxerChat.recv() => {
+                                        Some((Platform::Fluxer, m))
+                                }
+                        };
+                        if let Some((platform, message)) = heard {
+                                self.HandleMessage(platform, &message);
                         }
+                        self._chat.CheckTimeout();
                         self.Reconcile();
                 };
                 self.StopAll().await;
@@ -127,8 +129,9 @@ impl Coordinator {
                 let skipped: Vec<&str> =
                         afk.iter().map(String::as_str).collect();
                 let config = self._hub.getConfig();
+                let fixed = self._hub.getFixedLinks().getLinks();
                 matching::FindPairs(
-                        config.getLinks(),
+                        &fixed,
                         config.getGeneral().isNameMatchEnabled(),
                         &discord,
                         &fluxer,
@@ -265,105 +268,25 @@ impl Coordinator {
         // Commands
         // ====================================================================
 
-        // Answer a command from the configured Discord guild.
-        fn HandleMessage(&mut self, message: ChatMessage) {
-                let discord = self._hub.getPlatform(Platform::Discord);
-                if message.isAuthorBot()
-                        || message.getGuildId() != discord.getGuildId()
-                {
-                        return;
-                }
-                let prefix = self
-                        ._hub
-                        .getConfig()
-                        .getGeneral()
-                        .getCommandPrefix()
-                        .to_string();
-                let Some(command) =
-                        commands::ParseCommand(&prefix, message.getContent())
-                else {
-                        return;
-                };
-                if !self.TryStartCommand(message.getAuthorId()) { return; }
-                info!(
-                        user = %message.getAuthorId(),
-                        ?command,
-                        "command received",
-                );
-                let reply = match command {
-                        Command::Help => commands::FormatHelp(&prefix),
-                        Command::Toggle => self.Toggle(&message),
-                        Command::Status => self.FormatStatus(),
-                        Command::Unknown(name) => {
-                                commands::FormatUnknownReply(&prefix, &name)
-                        }
-                };
-                self.SendReply(&message, reply);
+        // Give a chat message to the command handler, with the state of the
+        // running links for the status command.
+        fn HandleMessage(&mut self, platform: Platform, message: &ChatMessage) {
+                let links = self.getLinkStatuses();
+                self._chat.Handle(platform, message, &links);
         }
 
-        // Record a command of a user. Return false while the user is in the
-        // cooldown, so that the command is ignored.
-        fn TryStartCommand(&mut self, user: &str) -> bool {
-                let now = Instant::now();
-                self._lastCommands
-                        .retain(|_, at| now - *at < COMMAND_COOLDOWN);
-                if self._lastCommands.contains_key(user) { return false; }
-                self._lastCommands.insert(user.to_string(), now);
-                true
-        }
-
-        // Turn the bridge off or on. The next Reconcile stops or starts the
-        // links.
-        fn Toggle(&self, message: &ChatMessage) -> String {
-                if !self.canToggle(message) {
-                        return "You need a command role for this.".into();
-                }
-                let is_enabled = !self._hub.isEnabled();
-                self._hub.SetEnabled(is_enabled);
-                if is_enabled {
-                        "Bridge is **on**. The bots mirror users again.".into()
-                } else {
-                        "Bridge is **off**. The bots leave voice.".into()
-                }
-        }
-
-        // Everyone can toggle when no command roles are set.
-        fn canToggle(&self, message: &ChatMessage) -> bool {
-                let allowed = self
-                        ._hub
-                        .getConfig()
-                        .getPlatform(Platform::Discord)
-                        .getCommandRoleIds();
-                allowed.is_empty()
-                        || message
-                                .getRoleIds()
-                                .iter()
-                                .any(|r| allowed.contains(r))
-        }
-
-        // Write the status report, with the links in name order.
-        fn FormatStatus(&self) -> String {
-                let mut links: Vec<_> =
+        // Return the state of each running link, in name order.
+        fn getLinkStatuses(&self) -> Vec<LinkStatus> {
+                let mut links: Vec<LinkStatus> =
                         self._links.values().map(|h| h.getStatus()).collect();
                 links.sort_by(|a, b| a.getName().cmp(b.getName()));
-                status::FormatReport(&self._hub, &links)
+                links
         }
+}
 
-        // Send the reply in the background, so that a slow API call does not
-        // stop the coordinator.
-        fn SendReply(&self, message: &ChatMessage, reply: String) {
-                let hub = self._hub.clone();
-                let (channel, id) = (
-                        message.getChannelId().to_string(),
-                        message.getId().to_string(),
-                );
-                tokio::spawn(async move {
-                        let rest = hub.getPlatform(Platform::Discord).getRest();
-                        if let Err(e) =
-                                rest.SendReply(&channel, &id, &reply).await
-                        {
-                                warn!(error = %e, "cannot send command reply");
-                        }
-                });
-        }
+// Take the chat message queue of the main bot of a platform. A queue that
+// another coordinator already took gives an empty queue.
+fn TakeMessages(hub: &Hub, platform: Platform) -> mpsc::Receiver<ChatMessage> {
+        let gateway = hub.getPlatform(platform).getGateway();
+        gateway.TakeMessages().unwrap_or_else(|| mpsc::channel(1).1)
 }

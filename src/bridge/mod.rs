@@ -5,7 +5,9 @@
 // ============================================================================
 // ============================================================================
 
+mod chat;
 mod coordinator;
+mod fixed_links;
 mod hub;
 mod link;
 mod matching;
@@ -24,6 +26,7 @@ use tracing::{error, warn};
 
 use crate::config::Config;
 use coordinator::Coordinator;
+use fixed_links::FixedLinks;
 use hub::Hub;
 
 const MAX_RESTART_DELAY: Duration = Duration::from_secs(120);
@@ -31,13 +34,17 @@ const MAX_RESTART_DELAY: Duration = Duration::from_secs(120);
 // again from the shortest value.
 const HEALTHY_RUN_TIME: Duration = Duration::from_secs(300);
 
-// Run the bridge until `stop` becomes true. Start again after an error.
+// Run the bridge until `stop` becomes true. Start again after an error. The
+// fixed links live outside the restarts, so that links that the commands
+// changed stay the same after a restart.
 pub async fn Supervise(config: Config, mut stop: watch::Receiver<bool>) {
-        let config = Arc::new(config);
+        let links = FixedLinks::New(config.getLinks(), config.getPath());
+        let (config, links) = (Arc::new(config), Arc::new(links));
         let mut failures: u32 = 0;
         loop {
                 let started = Instant::now();
-                let result = RunOnce(config.clone(), stop.clone()).await;
+                let run = RunOnce(config.clone(), links.clone(), stop.clone());
+                let result = run.await;
                 if started.elapsed() >= HEALTHY_RUN_TIME { failures = 0; }
                 match result {
                         Ok(()) => return,
@@ -61,9 +68,10 @@ pub async fn Supervise(config: Config, mut stop: watch::Receiver<bool>) {
 // Log in, run the coordinator, and log out.
 async fn RunOnce(
         config: Arc<Config>,
+        links: Arc<FixedLinks>,
         stop: watch::Receiver<bool>,
 ) -> Result<()> {
-        let hub = Hub::Start(config).await?;
+        let hub = Hub::Start(config, links).await?;
         let result = Coordinator::New(hub.clone()).Run(stop).await;
         hub.Close().await;
         result

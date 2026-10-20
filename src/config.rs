@@ -73,6 +73,8 @@ pub struct GeneralSettings {
         _proxyIdleName: String,
         #[serde(rename = "log_level")]
         _logLevel: String,
+        #[serde(rename = "audio_reports")]
+        _isAudioReportEnabled: bool,
         // Removed setting. It is still read, so that an old config file
         // loads, and Validate tells the operator to remove it.
         #[serde(rename = "voice_threshold")]
@@ -110,7 +112,7 @@ pub struct PlatformSettings {
 }
 
 // One fixed pair of voice channels to bridge.
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct LinkSettings {
         #[serde(rename = "discord_channel_id")]
@@ -131,6 +133,10 @@ pub struct Config {
         _fluxer: PlatformSettings,
         #[serde(rename = "links", default)]
         _links: Vec<LinkSettings>,
+        // The file that the config came from. The link commands write new
+        // links to it.
+        #[serde(skip)]
+        _path: PathBuf,
 }
 
 // ============================================================================
@@ -152,6 +158,12 @@ impl GeneralSettings {
         pub fn getOverflowName(&self) -> &str { &self._overflowName }
         pub fn getLogLevel(&self) -> &str { &self._logLevel }
         pub fn getJitterFrames(&self) -> usize { self._jitterFrames }
+
+        // Return true when the bridge logs a receive report for each Discord
+        // speaker. The reports help to find audio problems.
+        pub fn isAudioReportEnabled(&self) -> bool {
+                self._isAudioReportEnabled
+        }
 
         pub fn getSilenceHangover(&self) -> Duration {
                 Duration::from_millis(self._silenceHangoverMs)
@@ -202,6 +214,7 @@ impl Default for GeneralSettings {
                         _overflowName: DEFAULT_OVERFLOW_NAME.into(),
                         _proxyIdleName: DEFAULT_PROXY_IDLE_NAME.into(),
                         _logLevel: DEFAULT_LOG_LEVEL.into(),
+                        _isAudioReportEnabled: false,
                         _removedVoiceThreshold: None,
                         _silenceHangoverMs: DEFAULT_HANGOVER_MS,
                         _jitterFrames: DEFAULT_JITTER_FRAMES,
@@ -278,7 +291,6 @@ impl PlatformSettings {
                 }
                 if platform == Platform::Discord {
                         RequireNumber(&self._guildId, "discord.guild_id")?;
-                        self.WarnOpenCommands();
                 }
                 WarnPlainUrl(&self._apiUrl, &format!("{label}.api_url"));
                 WarnPlainUrl(
@@ -286,16 +298,6 @@ impl PlatformSettings {
                         &format!("{label}.gateway_url"),
                 );
                 Ok(())
-        }
-
-        // Without command roles, every member of the guild can turn the
-        // bridge off.
-        fn WarnOpenCommands(&self) {
-                if !self._commandRoleIds.is_empty() { return; }
-                warn!(
-                        "discord.command_role_ids is empty, so every member \
-                         can use the toggle command"
-                );
         }
 
         // Remove empty and repeated proxy tokens, and the main token.
@@ -323,6 +325,18 @@ impl LinkSettings {
                         Platform::Fluxer => &self._fluxerChannelId,
                 }
         }
+
+        // Return true if the link uses the channel of the platform.
+        pub fn hasChannel(&self, platform: Platform, channel_id: &str) -> bool {
+                self.getChannelId(platform).trim() == channel_id.trim()
+        }
+
+        pub fn New(discord_channel_id: &str, fluxer_channel_id: &str) -> Self {
+                Self {
+                        _discordChannelId: discord_channel_id.to_string(),
+                        _fluxerChannelId: fluxer_channel_id.to_string(),
+                }
+        }
 }
 
 // ============================================================================
@@ -332,6 +346,7 @@ impl LinkSettings {
 impl Config {
         pub fn getGeneral(&self) -> &GeneralSettings { &self._general }
         pub fn getLinks(&self) -> &[LinkSettings] { &self._links }
+        pub fn getPath(&self) -> &Path { &self._path }
 
         pub fn getPlatform(&self, platform: Platform) -> &PlatformSettings {
                 match platform {
@@ -340,15 +355,36 @@ impl Config {
                 }
         }
 
+        // Return true if a user with `role_ids` can use the commands that
+        // change the bridge. The command roles of both platforms count.
+        // When no command roles are set, everyone can.
+        pub fn isCommandAllowed(&self, role_ids: &[String]) -> bool {
+                if !self.hasCommandRoles() { return true; }
+                let allowed = PLATFORMS
+                        .iter()
+                        .flat_map(|p| self.getPlatform(*p).getCommandRoleIds());
+                let allowed: HashSet<&String> = allowed.collect();
+                role_ids.iter().any(|role| allowed.contains(role))
+        }
+
+        fn hasCommandRoles(&self) -> bool {
+                PLATFORMS.iter().any(|p| {
+                        !self.getPlatform(*p).getCommandRoleIds().is_empty()
+                })
+        }
+
         // Read the config file. Call Prepare before the config is used.
         pub fn Read(path: &Path) -> Result<Config> {
                 let text = fs::read_to_string(path).with_context(|| {
                         let name = path.display();
                         format!("cannot read {name}, copy config.example.toml")
                 })?;
-                toml::from_str(&text).with_context(|| {
-                        format!("{} is not valid", path.display())
-                })
+                let mut config: Config =
+                        toml::from_str(&text).with_context(|| {
+                                format!("{} is not valid", path.display())
+                        })?;
+                config._path = path.to_path_buf();
+                Ok(config)
         }
 
         fn getPlatformMut(
@@ -376,7 +412,18 @@ impl Config {
                                 bail!("links[{i}].fluxer_channel_id is empty");
                         }
                 }
+                self.WarnOpenCommands();
                 Ok(())
+        }
+
+        // Without command roles, every member of both servers can turn the
+        // bridge off and change the links.
+        fn WarnOpenCommands(&self) {
+                if self.hasCommandRoles() { return; }
+                warn!(
+                        "discord.command_role_ids and fluxer.command_role_ids \
+                         are empty, so every member can use all commands"
+                );
         }
 }
 
@@ -497,6 +544,29 @@ mod tests {
                         config.getGeneral().getSilenceHangover(),
                         Duration::from_millis(HANGOVER_MIN_MS)
                 );
+        }
+
+        #[test]
+        fn CommandRolesOfBothPlatformsCount() {
+                let roles = |ids: &[&str]| -> Vec<String> {
+                        ids.iter().map(|id| id.to_string()).collect()
+                };
+                // No roles set: everyone can.
+                let open = Parse(MINIMAL);
+                assert!(open.isCommandAllowed(&[]));
+                // A role from either list is enough.
+                let text = MINIMAL
+                        .replace("main_token = \"Bot abc\"",
+                                 "main_token = \"Bot abc\"\n\
+                                  command_role_ids = [\"d1\"]")
+                        .replace("main_token = \"xyz\"",
+                                 "main_token = \"xyz\"\n\
+                                  command_role_ids = [\"f1\"]");
+                let config = Parse(&text);
+                assert!(config.isCommandAllowed(&roles(&["d1"])));
+                assert!(config.isCommandAllowed(&roles(&["x", "f1"])));
+                assert!(!config.isCommandAllowed(&roles(&["x"])));
+                assert!(!config.isCommandAllowed(&[]));
         }
 
         #[test]

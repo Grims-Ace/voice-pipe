@@ -44,6 +44,12 @@ proxy_idle_name = "Voice Pipe Proxy {number}"
 # "info,voice_pipe=debug". The RUST_LOG variable replaces this value.
 log_level = "info"
 
+# Log a "receive report" for each Discord speaker every 10 seconds: packets,
+# lost packets, levels, clipping, and how much the two channels differ. Use
+# it to find audio problems. Only numbers are logged, never audio. Default
+# false.
+audio_reports = false
+
 # Time (ms) that a bot keeps sending after speech stops, so that the ends of
 # words are not cut. Default 300.
 silence_hangover_ms = 300
@@ -73,8 +79,9 @@ proxy_tokens = [
         # "proxy-token-2",
 ]
 
-# Role IDs that can use the toggle command. Empty = everyone can use it,
-# so any member can turn the bridge off. Set at least one role.
+# Discord role IDs that can use toggle, link, confirm, and unlink. The roles
+# in fluxer.command_role_ids count too. When both lists are empty, everyone
+# can use all commands, so any member can turn the bridge off.
 command_role_ids = []
 
 # Discord URLs. You do not need to change these.
@@ -96,6 +103,10 @@ main_token = ""
 proxy_tokens = [
         # "proxy-token-1",
 ]
+
+# Fluxer role IDs that can use toggle, link, confirm, and unlink. The roles
+# in discord.command_role_ids count too (see above).
+command_role_ids = []
 
 # Fluxer runs on this machine, so the bridge talks to it on the local edge
 # port and does not go through Cloudflare or nginx. The defaults are for a
@@ -124,6 +135,10 @@ host_header = ""
 # -----------------------------------------------------------------------------
 # Link two channels that do not have the same name. Add one block for each
 # link. Each channel can be in only one link.
+#
+# The vp!link, vp!confirm, and vp!unlink commands add and remove these
+# blocks while the bridge runs. They append new blocks at the end of this
+# file and remove only the block of the link. Other lines do not change.
 #
 # [[links]]
 # discord_channel_id = "123456789012345678"

@@ -1,15 +1,18 @@
 // ============================================================================
 // ============================================================================
-// Read the chat commands of the Discord main bot and write the help text.
+// Read the chat commands of the main bots and write the help text.
 // ============================================================================
 // ============================================================================
 
-// A command that a Discord user can send.
+// A command that a user on Discord or Fluxer can send.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
         Help,
         Toggle,
         Status,
+        Link,
+        Confirm,
+        Unlink,
         Unknown(String),
 }
 
@@ -23,6 +26,9 @@ pub fn ParseCommand(prefix: &str, content: &str) -> Option<Command> {
                 "help" => Command::Help,
                 "toggle" => Command::Toggle,
                 "status" => Command::Status,
+                "link" => Command::Link,
+                "confirm" => Command::Confirm,
+                "unlink" => Command::Unlink,
                 _ => Command::Unknown(name),
         };
         Some(command)
@@ -36,7 +42,16 @@ pub fn FormatHelp(prefix: &str) -> String {
                  `{prefix}toggle` · Turn the bridge off or on. When it is \
                  off, the bots leave voice and ignore users.\n\
                  `{prefix}status` · Show the bridge state, the proxy bots, \
-                 and the voice relays."
+                 and the voice relays.\n\
+                 `{prefix}link` · Start to link this voice channel. Then \
+                 send `{prefix}confirm` in a voice channel on the other \
+                 platform within 5 minutes.\n\
+                 `{prefix}confirm` · Link this voice channel with the one \
+                 that waits for confirmation.\n\
+                 `{prefix}unlink` · Remove the fixed link of this voice \
+                 channel.\n\
+                 Send link, confirm, and unlink in the text chat of a \
+                 voice channel."
         )
 }
 
@@ -60,6 +75,19 @@ mod tests {
                         Some(Command::Toggle)
                 );
                 assert_eq!(ParseCommand("vp!", "hello vp!help"), None);
+        }
+
+        #[test]
+        fn LinkCommandsAreKnown() {
+                assert_eq!(ParseCommand("vp!", "vp!link"), Some(Command::Link));
+                assert_eq!(
+                        ParseCommand("vp!", "vp!Confirm"),
+                        Some(Command::Confirm)
+                );
+                assert_eq!(
+                        ParseCommand("vp!", "vp!unlink"),
+                        Some(Command::Unlink)
+                );
         }
 
         #[test]

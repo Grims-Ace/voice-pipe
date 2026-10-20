@@ -258,7 +258,9 @@ Optional settings:
 | `general.proxy_idle_name` | `Voice Pipe Proxy {number}` | Nickname of a free proxy |
 | `general.silence_hangover_ms` | `300` | Send time after speech stops (minimum 20) |
 | `general.jitter_frames` | `3` | Overflow mixer buffer (20 ms frames) |
-| `discord.command_role_ids` | `[]` | Roles that can toggle (empty = all, with a warning at start) |
+| `general.audio_reports` | `false` | Log a receive report (packets, loss, levels, stereo) for each Discord speaker every 10 s |
+| `discord.command_role_ids` | `[]` | Discord roles that can use toggle, link, confirm, and unlink |
+| `fluxer.command_role_ids` | `[]` | Fluxer roles that can use the same commands (both lists empty = everyone, with a warning at start) |
 | `fluxer.livekit_url` | local edge | `""` uses the URL from Fluxer |
 | `fluxer.host_header` | none | Host name for local requests |
 | `[[links]]` | none | Fixed channel pairs |
@@ -318,14 +320,37 @@ journalctl -u voice-pipe -f
 
 ## Commands
 
-Send the commands in a text channel of the Discord server. The examples use
-the default prefix `vp!`.
+Send the commands in a text channel of the Discord server or the Fluxer
+server. Send `link`, `confirm`, and `unlink` in the text chat of a voice
+channel: the bridge uses that voice channel. The examples use the default
+prefix `vp!`.
 
 | Command | Result |
 | :--- | :--- |
 | `vp!help` | Shows the list of commands. |
-| `vp!toggle` | Turns the bridge off or on. When it is off, all bots leave voice and the bridge ignores users. When `command_role_ids` is set, only those roles can use it. |
+| `vp!toggle` | Turns the bridge off or on. When it is off, all bots leave voice and the bridge ignores users. Needs a command role. |
 | `vp!status` | Shows whether the bridge is on, the free proxies, where the main bots are, and each active link: users on each side, mirrors, and seconds of relayed speech. |
+| `vp!link` | Starts to link this voice channel. The bot answers "Listening to `vp!confirm`". The request ends after 5 minutes, or when someone sends a new `vp!link`. Needs a command role. |
+| `vp!confirm` | In a voice channel on the other platform: links this channel with the channel of the request. The link starts at once and is saved as a `[[links]]` entry in `config.toml`. Needs a command role. |
+| `vp!unlink` | Removes the fixed link of this voice channel, from the bridge and from `config.toml`. Needs a command role. |
+
+**Command roles.** `toggle`, `link`, `confirm`, and `unlink` need a command
+role. The command roles are the roles in `discord.command_role_ids` and in
+`fluxer.command_role_ids` together: a user on either platform with a role
+from either list can use these commands. When both lists are empty,
+everyone can use all commands (the bridge logs a warning at start). `help`
+and `status` are open to everyone. If only one list is set, users on the
+other platform cannot use these commands, because they have none of the
+roles.
+
+**Config file changes.** `confirm` appends a `[[links]]` entry at the end of
+`config.toml`, and `unlink` removes only the entry of that link. All other
+lines and comments stay the same. The bridge checks that the changed file is
+a valid config before it writes it, and keeps the file permissions. The bot
+user must be able to write to `config.toml` and to its directory. A channel
+that is already in a fixed link cannot be linked again: send `vp!unlink`
+first. `unlink` cannot remove a link by name; rename a channel or set
+`match_by_name = false` for that.
 
 Each user can send one command every 3 seconds. The bridge ignores other
 commands from that user during this time, so that command spam does not

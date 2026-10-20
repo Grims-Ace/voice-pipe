@@ -32,10 +32,11 @@ const SEND_QUEUE: usize = 64;
 // Types
 // ============================================================================
 
-// Values that control when audio counts as speech.
+// Values from the config that control how a bot handles audio.
 #[derive(Clone, Copy, Debug)]
 pub struct AudioTuning {
         _hangover: Duration,
+        _isReportEnabled: bool,
 }
 
 // Where a bot joins and where its received audio goes.
@@ -59,11 +60,16 @@ pub enum VoiceConnection {
 
 impl AudioTuning {
         pub fn getHangover(&self) -> Duration { self._hangover }
+        pub fn isReportEnabled(&self) -> bool { self._isReportEnabled }
 
         // `hangover` is how long a bot keeps sending after speech stops, so
-        // that the ends of words are not cut.
-        pub fn New(hangover: Duration) -> Self {
-                Self { _hangover: hangover }
+        // that the ends of words are not cut. `is_report_enabled` turns on
+        // the receive reports, which log numbers about each speaker's audio.
+        pub fn New(hangover: Duration, is_report_enabled: bool) -> Self {
+                Self {
+                        _hangover: hangover,
+                        _isReportEnabled: is_report_enabled,
+                }
         }
 }
 

@@ -118,11 +118,14 @@ struct SpeakerState {
 }
 
 // Gives the audio of each speaker to the bridge while the bot listens.
+// `_isReportEnabled` (the `audio_reports` setting) turns the receive
+// reports on. When it is off, no numbers are kept.
 struct VoiceReceiver {
         _streams: Arc<Mutex<StreamMap>>,
         _speakers: Mutex<HashMap<String, SpeakerState>>,
         _ownBotIds: Arc<HashSet<String>>,
         _isListening: Arc<AtomicBool>,
+        _isReportEnabled: bool,
         _heard: mpsc::Sender<SpeakerFrame>,
 }
 
@@ -226,6 +229,7 @@ impl EventHandler for VoiceReceiver {
                 for (ssrc, data) in &tick.speaking {
                         self.Forward(&streams, &mut speakers, *ssrc, data);
                 }
+                if !self._isReportEnabled { return None; }
                 for (user, speaker) in speakers.iter_mut() {
                         speaker._stats.LogIfDue(user);
                 }
@@ -249,7 +253,7 @@ impl VoiceReceiver {
                 let Some(user) = streams.getAudioUser(ssrc) else { return };
                 if self._ownBotIds.contains(user) { return; }
                 let speaker = speakers.entry(user.clone()).or_default();
-                speaker._stats.Record(data);
+                if self._isReportEnabled { speaker._stats.Record(data); }
                 let Some(pcm) = &data.decoded_voice else { return };
                 for frame in TakeFrames(&mut speaker._pending, pcm) {
                         if frame.isSilent() { continue; }
@@ -557,6 +561,7 @@ fn AddReceiveEvents(
                 _speakers: Mutex::new(HashMap::new()),
                 _ownBotIds: target.getOwnBotIds(),
                 _isListening: is_listening,
+                _isReportEnabled: target.getTuning().isReportEnabled(),
                 _heard: target.getHeard(),
         };
         driver.add_global_event(Event::Core(CoreEvent::VoiceTick), receiver);

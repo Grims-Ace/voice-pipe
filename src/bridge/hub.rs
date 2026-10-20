@@ -15,6 +15,7 @@ use anyhow::{Context, Result};
 use futures_util::future::join_all;
 use tracing::{error, info};
 
+use super::fixed_links::FixedLinks;
 use super::link::LinkKey;
 use super::proxy::{ProxyAccount, ProxyPool};
 use super::saved;
@@ -54,6 +55,7 @@ pub struct PlatformHub {
 // The shared state of the whole bridge.
 pub struct Hub {
         _config: Arc<Config>,
+        _fixedLinks: Arc<FixedLinks>,
         _tuning: AudioTuning,
         _discord: PlatformHub,
         _fluxer: PlatformHub,
@@ -224,6 +226,7 @@ impl PlatformHub {
 
 impl Hub {
         pub fn getConfig(&self) -> &Config { &self._config }
+        pub fn getFixedLinks(&self) -> &FixedLinks { &self._fixedLinks }
         pub fn getTuning(&self) -> AudioTuning { self._tuning }
         pub fn isEnabled(&self) -> bool {
                 self._isEnabled.load(Ordering::Relaxed)
@@ -246,7 +249,10 @@ impl Hub {
         }
 
         // Log in all bots on both platforms.
-        pub async fn Start(config: Arc<Config>) -> Result<Arc<Hub>> {
+        pub async fn Start(
+                config: Arc<Config>,
+                fixed_links: Arc<FixedLinks>,
+        ) -> Result<Arc<Hub>> {
                 let http = reqwest::Client::builder().build()?;
                 let (discord, fluxer) = tokio::try_join!(
                         PlatformHub::Start(Platform::Discord, &config, &http),
@@ -255,9 +261,13 @@ impl Hub {
                 let general = config.getGeneral();
                 let is_enabled = FindStartState(general);
                 Ok(Arc::new(Hub {
-                        _tuning: AudioTuning::New(general.getSilenceHangover()),
+                        _tuning: AudioTuning::New(
+                                general.getSilenceHangover(),
+                                general.isAudioReportEnabled(),
+                        ),
                         _isEnabled: AtomicBool::new(is_enabled),
                         _config: config,
+                        _fixedLinks: fixed_links,
                         _discord: discord,
                         _fluxer: fluxer,
                 }))
@@ -288,16 +298,16 @@ fn FindStartState(general: &GeneralSettings) -> bool {
         }
 }
 
-// The Discord main bot reads chat messages for the commands.
+// The main bots of both platforms read chat messages for the commands.
 fn BuildMainGatewaySettings(
         platform: Platform,
         settings: &PlatformSettings,
         bot_id: &str,
 ) -> GatewaySettings {
-        let mut intents = INTENT_GUILDS | INTENT_GUILD_VOICE_STATES;
-        if platform == Platform::Discord {
-                intents |= INTENT_GUILD_MESSAGES | INTENT_MESSAGE_CONTENT;
-        }
+        let intents = INTENT_GUILDS
+                | INTENT_GUILD_VOICE_STATES
+                | INTENT_GUILD_MESSAGES
+                | INTENT_MESSAGE_CONTENT;
         GatewaySettings::New(
                 &format!("{platform} main"),
                 platform,
