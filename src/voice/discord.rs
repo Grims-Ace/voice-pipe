@@ -77,7 +77,9 @@ struct SsrcTracker {
 // Numbers about the received audio of one speaker, for the receive report.
 // They show if Songbird gives all of the audio: the packet lengths, the
 // packets that never came (gaps in the RTP sequence numbers), and the frames
-// that Songbird made up for lost packets.
+// that Songbird made up for lost packets. The levels show if the decoded
+// audio clips: Songbird decodes to 16-bit samples, so audio that is louder
+// than full scale is cut flat at the largest value.
 #[derive(Default)]
 struct ReceiveStats {
         _since: Option<Instant>,
@@ -87,6 +89,17 @@ struct ReceiveStats {
         _missingPackets: u32,
         _madeUpFrames: u32,
         _lastSequence: Option<u16>,
+        _levels: LevelStats,
+}
+
+// The peak, the loudness, and the clipped samples of decoded audio. Only
+// numbers are kept, never the audio.
+#[derive(Default)]
+struct LevelStats {
+        _peak: u16,
+        _clippedSamples: u64,
+        _sumOfSquares: f64,
+        _sampleCount: u64,
 }
 
 // What the receiver keeps for one speaker. `_pending` is the part of their
@@ -247,8 +260,9 @@ impl ReceiveStats {
         // Count one tick of a speaker's audio from Songbird.
         fn Record(&mut self, data: &VoiceData) {
                 self._since.get_or_insert_with(Instant::now);
-                let samples = data.decoded_voice.as_ref().map_or(0, Vec::len);
-                let length_ms = samples / SAMPLES_PER_MS;
+                let pcm = data.decoded_voice.as_deref().unwrap_or_default();
+                self._levels.Record(pcm);
+                let length_ms = pcm.len() / SAMPLES_PER_MS;
                 self._audioMs += length_ms;
                 let Some(rtp) = &data.packet else {
                         self._madeUpFrames += 1;
@@ -281,10 +295,35 @@ impl ReceiveStats {
                         packet_lengths = %lengths.join(" "),
                         missing_packets = self._missingPackets,
                         made_up_frames = self._madeUpFrames,
+                        peak = self._levels._peak,
+                        clipped = self._levels._clippedSamples,
+                        rms = self._levels.getRms(),
                         "receive report",
                 );
                 let last = self._lastSequence;
                 *self = Self { _lastSequence: last, ..Default::default() };
+        }
+}
+
+impl LevelStats {
+        // Return the average loudness (root mean square, 0 to 32768).
+        fn getRms(&self) -> u32 {
+                if self._sampleCount == 0 { return 0; }
+                let mean = self._sumOfSquares / self._sampleCount as f64;
+                mean.sqrt().round() as u32
+        }
+
+        // Count the samples of one decoded block. A sample at the largest
+        // or smallest 16-bit value is clipped.
+        fn Record(&mut self, pcm: &[i16]) {
+                const FULL_SCALE: u16 = i16::MAX as u16;
+                for &sample in pcm {
+                        let level = sample.unsigned_abs();
+                        self._peak = self._peak.max(level);
+                        if level >= FULL_SCALE { self._clippedSamples += 1; }
+                        self._sumOfSquares += f64::from(sample).powi(2);
+                }
+                self._sampleCount += pcm.len() as u64;
         }
 }
 
@@ -598,6 +637,20 @@ mod tests {
                 assert_eq!(CountMissing(10, 5000), 0);
                 let header = [0x80, 120, 0x12, 0x34];
                 assert_eq!(ReadSequence(&header), Some(0x1234));
+        }
+
+        #[test]
+        fn LevelsCountClippedSamples() {
+                let mut levels = LevelStats::default();
+                levels.Record(&[i16::MAX, i16::MIN, 1000, -1000]);
+                assert_eq!(levels._clippedSamples, 2);
+                assert_eq!(levels._peak, 32768);
+                levels.Record(&[]);
+                let mut quiet = LevelStats::default();
+                quiet.Record(&[300, -300]);
+                assert_eq!(quiet.getRms(), 300);
+                assert_eq!(quiet._clippedSamples, 0);
+                assert_eq!(LevelStats::default().getRms(), 0);
         }
 
         #[test]
