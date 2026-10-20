@@ -5,12 +5,12 @@
 // ============================================================================
 // ============================================================================
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom};
 use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
@@ -39,6 +39,13 @@ const PLAYBACK_PREBUFFER: usize = 3;
 // Remove the oldest frames above this depth, so that delay cannot grow
 // (about 240 ms).
 const PLAYBACK_MAX_DEPTH: usize = 12;
+// Time between two receive reports for one speaker.
+const REPORT_INTERVAL: Duration = Duration::from_secs(10);
+// Stereo samples in one millisecond of 48 kHz audio.
+const SAMPLES_PER_MS: usize = SAMPLE_RATE as usize / 1000 * CHANNELS;
+// A larger forward jump in RTP sequence numbers is a new start of the
+// stream (or an old packet), not lost packets.
+const SEQUENCE_JUMP_MAX: u16 = 1000;
 
 // ============================================================================
 // Types
@@ -67,12 +74,34 @@ struct SsrcTracker {
         _streams: Arc<Mutex<StreamMap>>,
 }
 
+// Numbers about the received audio of one speaker, for the receive report.
+// They show if Songbird gives all of the audio: the packet lengths, the
+// packets that never came (gaps in the RTP sequence numbers), and the frames
+// that Songbird made up for lost packets.
+#[derive(Default)]
+struct ReceiveStats {
+        _since: Option<Instant>,
+        _audioMs: usize,
+        _packets: u32,
+        _packetLengths: BTreeMap<usize, u32>,
+        _missingPackets: u32,
+        _madeUpFrames: u32,
+        _lastSequence: Option<u16>,
+}
+
+// What the receiver keeps for one speaker. `_pending` is the part of their
+// audio that is shorter than one frame, until their next packet completes
+// it.
+#[derive(Default)]
+struct SpeakerState {
+        _pending: Vec<i16>,
+        _stats: ReceiveStats,
+}
+
 // Gives the audio of each speaker to the bridge while the bot listens.
-// `_pending` keeps the part of each speaker's audio that is shorter than one
-// frame, until their next packet completes it.
 struct VoiceReceiver {
         _streams: Arc<Mutex<StreamMap>>,
-        _pending: Mutex<HashMap<String, Vec<i16>>>,
+        _speakers: Mutex<HashMap<String, SpeakerState>>,
         _ownBotIds: Arc<HashSet<String>>,
         _isListening: Arc<AtomicBool>,
         _heard: mpsc::Sender<SpeakerFrame>,
@@ -174,9 +203,12 @@ impl EventHandler for VoiceReceiver {
                 let EventContext::VoiceTick(tick) = ctx else { return None };
                 if !self._isListening.load(Ordering::Relaxed) { return None; }
                 let streams = self._streams.lock().unwrap();
-                let mut pending = self._pending.lock().unwrap();
+                let mut speakers = self._speakers.lock().unwrap();
                 for (ssrc, data) in &tick.speaking {
-                        self.Forward(&streams, &mut pending, *ssrc, data);
+                        self.Forward(&streams, &mut speakers, *ssrc, data);
+                }
+                for (user, speaker) in speakers.iter_mut() {
+                        speaker._stats.LogIfDue(user);
                 }
                 None
         }
@@ -191,19 +223,82 @@ impl VoiceReceiver {
         fn Forward(
                 &self,
                 streams: &StreamMap,
-                pending: &mut HashMap<String, Vec<i16>>,
+                speakers: &mut HashMap<String, SpeakerState>,
                 ssrc: u32,
                 data: &VoiceData,
         ) {
                 let Some(user) = streams.getAudioUser(ssrc) else { return };
                 if self._ownBotIds.contains(user) { return; }
+                let speaker = speakers.entry(user.clone()).or_default();
+                speaker._stats.Record(data);
                 let Some(pcm) = &data.decoded_voice else { return };
-                let rest = pending.entry(user.clone()).or_default();
-                for frame in TakeFrames(rest, pcm) {
+                for frame in TakeFrames(&mut speaker._pending, pcm) {
                         if frame.isSilent() { continue; }
                         let _ = self._heard.try_send((user.clone(), frame));
                 }
         }
+}
+
+// ============================================================================
+// Receive Report
+// ============================================================================
+
+impl ReceiveStats {
+        // Count one tick of a speaker's audio from Songbird.
+        fn Record(&mut self, data: &VoiceData) {
+                self._since.get_or_insert_with(Instant::now);
+                let samples = data.decoded_voice.as_ref().map_or(0, Vec::len);
+                let length_ms = samples / SAMPLES_PER_MS;
+                self._audioMs += length_ms;
+                let Some(rtp) = &data.packet else {
+                        self._madeUpFrames += 1;
+                        return;
+                };
+                self._packets += 1;
+                *self._packetLengths.entry(length_ms).or_default() += 1;
+                let Some(sequence) = ReadSequence(&rtp.packet) else { return };
+                if let Some(last) = self._lastSequence {
+                        self._missingPackets += CountMissing(last, sequence);
+                }
+                self._lastSequence = Some(sequence);
+        }
+
+        // Write the report and start a new one, if the interval has passed.
+        // Keep the last sequence number, so that the next report continues
+        // to count gaps.
+        fn LogIfDue(&mut self, user: &str) {
+                let Some(since) = self._since else { return };
+                if since.elapsed() < REPORT_INTERVAL { return; }
+                let lengths: Vec<String> = self
+                        ._packetLengths
+                        .iter()
+                        .map(|(ms, count)| format!("{ms}ms:{count}"))
+                        .collect();
+                info!(
+                        %user,
+                        audio_ms = self._audioMs,
+                        packets = self._packets,
+                        packet_lengths = %lengths.join(" "),
+                        missing_packets = self._missingPackets,
+                        made_up_frames = self._madeUpFrames,
+                        "receive report",
+                );
+                let last = self._lastSequence;
+                *self = Self { _lastSequence: last, ..Default::default() };
+        }
+}
+
+// The RTP sequence number is the third and fourth byte of the header.
+fn ReadSequence(packet: &[u8]) -> Option<u16> {
+        let bytes = packet.get(2..4)?;
+        Some(u16::from_be_bytes([bytes[0], bytes[1]]))
+}
+
+// Return the number of packets between two packets that came one after the
+// other. A large jump means that the stream started again, not loss.
+fn CountMissing(last: u16, sequence: u16) -> u32 {
+        let gap = sequence.wrapping_sub(last).wrapping_sub(1);
+        if gap >= SEQUENCE_JUMP_MAX { 0 } else { u32::from(gap) }
 }
 
 // ============================================================================
@@ -387,7 +482,7 @@ fn AddReceiveEvents(
         }
         let receiver = VoiceReceiver {
                 _streams: streams,
-                _pending: Mutex::new(HashMap::new()),
+                _speakers: Mutex::new(HashMap::new()),
                 _ownBotIds: target.getOwnBotIds(),
                 _isListening: is_listening,
                 _heard: target.getHeard(),
@@ -490,6 +585,19 @@ mod tests {
                 assert_eq!(bytes.len(), PLAYBACK_PREBUFFER * FRAME_LEN * 4);
                 assert_eq!(&bytes[..4], &0.5f32.to_le_bytes());
                 assert_eq!(ReadAll(&mut source, 1000).len(), 0);
+        }
+
+        #[test]
+        fn SequenceGapsCountMissingPackets() {
+                assert_eq!(CountMissing(10, 11), 0);
+                assert_eq!(CountMissing(10, 13), 2);
+                // The 16-bit counter wraps around.
+                assert_eq!(CountMissing(65535, 1), 1);
+                // An old packet or a restart is not loss.
+                assert_eq!(CountMissing(10, 9), 0);
+                assert_eq!(CountMissing(10, 5000), 0);
+                let header = [0x80, 120, 0x12, 0x34];
+                assert_eq!(ReadSequence(&header), Some(0x1234));
         }
 
         #[test]
