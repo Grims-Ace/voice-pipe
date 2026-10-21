@@ -28,6 +28,12 @@ toml = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# Songbird 0.6.1 gives the DAVE trailer to the Opus decoder with the audio,
+# which damages CELT audio. The patched copy uses the body range from the
+# decrypt step. Remove this when a fixed songbird is released.
+[patch.crates-io]
+songbird = { path = "vendor/songbird" }
+
 [profile.release]
 opt-level = 3
 lto = "thin"
