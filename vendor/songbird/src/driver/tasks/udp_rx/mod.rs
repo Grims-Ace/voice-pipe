@@ -262,7 +262,7 @@ impl UdpRx {
                 let entry = self
                     .decoder_map
                     .entry(rtp.get_ssrc())
-                    .or_insert_with(|| SsrcState::new(&rtp, &self.config));
+                    .or_insert_with(|| SsrcState::new(&rtp, crypto_mode, &self.config));
 
                 // Only do this on RTP, rather than RTCP -- this pins decoder state liveness
                 // to *speech* rather than just presence.
@@ -271,7 +271,6 @@ impl UdpRx {
                 let store_pkt = StoredPacket {
                     packet: packet.freeze(),
                     decrypted,
-                    payload_offset: rtp_body_start,
                     payload_end_pad: rtp_body_tail,
                 };
                 let packet = store_pkt.packet.clone();

@@ -8,10 +8,10 @@ pub struct StoredPacket {
     pub packet: Bytes,
     // We need to store this as it's possible that a user can change config modes.
     pub decrypted: bool,
-    // voice-pipe patch: the body range after transport and DAVE decryption.
-    // DAVE leaves its trailer after the plaintext, so the body tail must
-    // come from the decrypt step, not from the crypto mode alone.
-    pub payload_offset: usize,
+    // voice-pipe patch: the bytes to discard at the end of the payload after
+    // transport and DAVE decryption. DAVE leaves its trailer after the
+    // plaintext, so the tail must come from the decrypt step, not from the
+    // crypto mode alone.
     pub payload_end_pad: usize,
 }
 
