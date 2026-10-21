@@ -141,6 +141,11 @@ twilight = [
 ]
 tws = ["dep:tokio-websockets"]
 
+# voice-pipe: hide warnings for code that only some feature sets use, as
+# Cargo does for crates from crates.io.
+[lints.rust]
+unused = "allow"
+
 [lib]
 name = "songbird"
 path = "src/lib.rs"
