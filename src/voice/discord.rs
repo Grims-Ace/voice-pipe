@@ -15,7 +15,9 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use songbird::driver::{DecodeConfig, DecodeMode, Driver};
-use songbird::events::context_data::{DisconnectReason, VoiceData};
+use songbird::events::context_data::{DisconnectReason, RtpData, VoiceData};
+use songbird::packet::rtp::RtpExtensionPacket;
+use songbird::packet::{Packet, PacketSize};
 use songbird::events::{CoreEvent, Event, EventContext, EventHandler};
 use songbird::id::{ChannelId, GuildId, UserId};
 use songbird::input::{Input, RawAdapter};
@@ -47,6 +49,8 @@ const SAMPLES_PER_MS: usize = SAMPLE_RATE as usize / 1000 * CHANNELS;
 // A larger forward jump in RTP sequence numbers is a new start of the
 // stream (or an old packet), not lost packets.
 const SEQUENCE_JUMP_MAX: u16 = 1000;
+// The last two bytes of a frame with DAVE end-to-end encryption data.
+const DAVE_MAGIC_MARKER: [u8; 2] = [0xFA, 0xFA];
 
 // ============================================================================
 // Types
@@ -91,6 +95,18 @@ struct ReceiveStats {
         _madeUpFrames: u32,
         _lastSequence: Option<u16>,
         _levels: LevelStats,
+        _opus: OpusStats,
+}
+
+// Numbers about the Opus data that Songbird gives to its decoder: the
+// bitrate, the coding mode of each packet, and the packets that still end
+// with the DAVE trailer (the end-to-end encryption data after the audio).
+#[derive(Default)]
+struct OpusStats {
+        _bytes: usize,
+        _audioMs: usize,
+        _modes: BTreeMap<String, u32>,
+        _daveTrailers: u32,
 }
 
 // The peak, the loudness, and the clipped samples of decoded audio. Only
@@ -284,6 +300,9 @@ impl ReceiveStats {
                 };
                 self._packets += 1;
                 *self._packetLengths.entry(length_ms).or_default() += 1;
+                if let Some(opus) = ReadOpusInfo(rtp) {
+                        self._opus.Record(&opus, length_ms);
+                }
                 let Some(sequence) = ReadSequence(&rtp.packet) else { return };
                 if let Some(last) = self._lastSequence {
                         self._missingPackets += CountMissing(last, sequence);
@@ -313,11 +332,79 @@ impl ReceiveStats {
                         clipped = self._levels._clippedSamples,
                         rms = self._levels.getRms(),
                         stereo = %self._levels.DescribeStereo(),
+                        kbps = self._opus.getKbps(),
+                        opus = %self._opus.DescribeModes(),
+                        dave = self._opus._daveTrailers,
                         "receive report",
                 );
                 let last = self._lastSequence;
                 *self = Self { _lastSequence: last, ..Default::default() };
         }
+}
+
+impl OpusStats {
+        // Return the bitrate of the Opus data in kilobits each second.
+        fn getKbps(&self) -> usize {
+                if self._audioMs == 0 { return 0; }
+                self._bytes * 8 / self._audioMs
+        }
+
+        // Write the coding modes for the report, such as
+        // "celt-stereo:480 silk-mono:20".
+        fn DescribeModes(&self) -> String {
+                let modes: Vec<String> = self
+                        ._modes
+                        .iter()
+                        .map(|(mode, count)| format!("{mode}:{count}"))
+                        .collect();
+                modes.join(" ")
+        }
+
+        fn Record(&mut self, opus: &OpusInfo, length_ms: usize) {
+                self._bytes += opus._bytes;
+                self._audioMs += length_ms;
+                *self._modes.entry(opus._mode.clone()).or_default() += 1;
+                if opus._hasDaveTrailer { self._daveTrailers += 1; }
+        }
+}
+
+// What one packet gives to the Opus decoder.
+struct OpusInfo {
+        _bytes: usize,
+        _mode: String,
+        _hasDaveTrailer: bool,
+}
+
+// Read the bytes that Songbird gives to the Opus decoder for a packet, by
+// the same rule as Songbird: the RTP payload without the transport
+// encryption and without the RTP header extension.
+fn ReadOpusInfo(rtp: &RtpData) -> Option<OpusInfo> {
+        let packet = rtp.rtp();
+        let payload = packet.payload();
+        let body = payload.get(rtp.payload_offset..rtp.payload_end_pad)?;
+        let start = match packet.get_extension() {
+                0 => 0,
+                _ => RtpExtensionPacket::new(body)?.packet_size(),
+        };
+        let opus = body.get(start..)?;
+        Some(OpusInfo {
+                _bytes: opus.len(),
+                _mode: DescribeToc(*opus.first()?),
+                _hasDaveTrailer: opus.ends_with(&DAVE_MAGIC_MARKER),
+        })
+}
+
+// Name the coding mode of an Opus packet from its first byte (the TOC byte,
+// RFC 6716 section 3.1). Configurations 0 to 11 are SILK, 12 to 15 are
+// hybrid, and 16 to 31 are CELT. Bit 2 is the stereo flag.
+fn DescribeToc(toc: u8) -> String {
+        let mode = match toc >> 3 {
+                0..=11 => "silk",
+                12..=15 => "hybrid",
+                _ => "celt",
+        };
+        let channels = if toc & 0b100 != 0 { "stereo" } else { "mono" };
+        format!("{mode}-{channels}")
 }
 
 impl LevelStats {
@@ -560,12 +647,13 @@ fn AddReceiveEvents(
                 let tracker = SsrcTracker { _streams: streams.clone() };
                 driver.add_global_event(Event::Core(event), tracker);
         }
+        let tuning = target.getTuning();
         let receiver = VoiceReceiver {
                 _streams: streams,
                 _speakers: Mutex::new(HashMap::new()),
                 _ownBotIds: target.getOwnBotIds(),
                 _isListening: is_listening,
-                _isReportEnabled: target.getTuning().isReportEnabled(),
+                _isReportEnabled: tuning.isReportEnabled(),
                 _heard: target.getHeard(),
         };
         driver.add_global_event(Event::Core(CoreEvent::VoiceTick), receiver);
@@ -699,6 +787,15 @@ mod tests {
                 let mut silent = LevelStats::default();
                 silent.Record(&[0, 0]);
                 assert_eq!(silent.DescribeStereo(), "none");
+        }
+
+        #[test]
+        fn TocByteGivesTheCodingMode() {
+                // Configuration in the top 5 bits, stereo flag in bit 2.
+                assert_eq!(DescribeToc(9 << 3), "silk-mono");
+                assert_eq!(DescribeToc((13 << 3) | 0b100), "hybrid-stereo");
+                assert_eq!(DescribeToc((31 << 3) | 0b100), "celt-stereo");
+                assert_eq!(DescribeToc(16 << 3), "celt-mono");
         }
 
         #[test]
