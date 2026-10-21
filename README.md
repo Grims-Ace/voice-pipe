@@ -104,6 +104,10 @@ use a proxy as their group bot.
   Fluxer the bot does not subscribe to any audio track.
 - Frames of digital silence are not sent. All other audio is sent, so that
   quiet sounds inside speech are not cut out.
+- Discord audio goes to Fluxer as mono from one channel (the louder one).
+  Some senders give two channels that are not equal, and two channels like
+  that sound hollow and echoing when they are added together. For a normal
+  microphone both channels are equal, so nothing changes.
 - A mirror sends audio only while its person speaks, plus a short
   `silence_hangover_ms`, so that the ends of words are not cut. Then the
   Discord track pauses and the Fluxer track goes idle (Opus DTX).

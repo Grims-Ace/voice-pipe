@@ -26,6 +26,7 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use super::{SEND_QUEUE, SpeakerFrame, VoiceTarget};
+use crate::audio::fold::MonoFold;
 use crate::audio::{AudioFrame, CHANNELS, FRAME_LEN, SAMPLE_RATE, TakeFrames};
 use crate::gateway::VoiceServer;
 
@@ -110,10 +111,11 @@ struct LevelStats {
 
 // What the receiver keeps for one speaker. `_pending` is the part of their
 // audio that is shorter than one frame, until their next packet completes
-// it.
+// it. `_fold` turns their audio into mono from one channel.
 #[derive(Default)]
 struct SpeakerState {
         _pending: Vec<i16>,
+        _fold: MonoFold,
         _stats: ReceiveStats,
 }
 
@@ -241,6 +243,7 @@ impl VoiceReceiver {
         // Give all of one speaker's decoded audio to the bridge in 20 ms
         // frames. A packet can hold more than one frame: the web client and
         // Vesktop send 40 or 60 ms packets when a camera uses the bandwidth.
+        // Each frame is folded to mono from one channel (see MonoFold).
         // Skip streams that are not the audio stream of a user, bridge bots,
         // and digital silence.
         fn Forward(
@@ -257,7 +260,8 @@ impl VoiceReceiver {
                 let Some(pcm) = &data.decoded_voice else { return };
                 for frame in TakeFrames(&mut speaker._pending, pcm) {
                         if frame.isSilent() { continue; }
-                        let _ = self._heard.try_send((user.clone(), frame));
+                        let mono = speaker._fold.Fold(&frame);
+                        let _ = self._heard.try_send((user.clone(), mono));
                 }
         }
 }
