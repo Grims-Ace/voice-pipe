@@ -280,6 +280,14 @@ cargo build --release
 ./target/release/voice-pipe /path/to/config.toml
 ```
 
+The build uses a patched copy of Songbird 0.6.1 in `vendor/songbird`.
+Songbird 0.6.1 gives the DAVE encryption trailer to the Opus decoder with
+the audio, which damages the audio of Discord users whose client sends
+CELT (for example, some clients with a webcam on). The patch is in
+`vendor/songbird-dave-trailer.patch`. When a fixed Songbird is released,
+remove the `[patch.crates-io]` entry in `Cargo.toml` and the `vendor`
+folder.
+
 Stop the bridge with Ctrl+C or `SIGTERM`. The bots leave voice and log out
 before the process stops (10 s limit).
 
@@ -440,6 +448,8 @@ src/
     proxy.rs        Proxy pool and proxy sessions (copy name and avatar)
     overflow.rs     Mix the speakers of a group for the group bot
     status.rs       Link state and the status report
+vendor/
+  songbird/         Songbird 0.6.1 with the DAVE trailer fix (ISC License)
 ```
 
 Run the tests:
@@ -452,3 +462,6 @@ cargo test
 
 voice-pipe is released under the [MIT License](LICENSE).
 Copyright (c) 2026 Grimsace.
+
+`vendor/songbird` is Songbird by the Songbird Contributors, released under
+the [ISC License](vendor/songbird/LICENSE.md).

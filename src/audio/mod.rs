@@ -6,7 +6,6 @@
 // ============================================================================
 
 pub mod buffer;
-pub mod fold;
 pub mod mixer;
 
 use std::fmt;
@@ -61,30 +60,6 @@ impl AudioFrame {
                 let len = src.len().min(FRAME_LEN);
                 frame._samples[..len].copy_from_slice(&src[..len]);
                 frame
-        }
-
-        // Return the energy (sum of squares) of the left and the right
-        // channel.
-        pub fn getChannelEnergy(&self) -> [f64; CHANNELS] {
-                let mut energy = [0.0; CHANNELS];
-                for pair in self._samples.as_chunks::<CHANNELS>().0 {
-                        for (sum, &sample) in energy.iter_mut().zip(pair) {
-                                *sum += f64::from(sample).powi(2);
-                        }
-                }
-                energy
-        }
-
-        // Return a frame where both channels are a copy of one channel
-        // (0 is left, 1 is right).
-        pub fn CopyChannel(&self, channel: usize) -> Self {
-                let mut out = [0i16; FRAME_LEN];
-                let source = self._samples.as_chunks::<CHANNELS>().0;
-                let target = out.as_chunks_mut::<CHANNELS>().0;
-                for (to, from) in target.iter_mut().zip(source) {
-                        *to = [from[channel]; CHANNELS];
-                }
-                Self::FromArray(out)
         }
 
         // Write the samples as little-endian f32 bytes, the raw PCM format
