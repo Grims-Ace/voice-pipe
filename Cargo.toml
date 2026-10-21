@@ -1,6 +1,6 @@
 [package]
 name = "voice-pipe"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 description = "Voice bridge between Discord and a self-hosted Fluxer instance."
 license = "MIT"
