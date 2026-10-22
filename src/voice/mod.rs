@@ -16,6 +16,7 @@ use anyhow::Result;
 use tokio::sync::mpsc;
 
 use crate::audio::AudioFrame;
+use crate::audio::gate::SpeechGate;
 use crate::gateway::Gateway;
 use crate::platform::Platform;
 use discord::DiscordVoice;
@@ -36,6 +37,7 @@ const SEND_QUEUE: usize = 64;
 #[derive(Clone, Copy, Debug)]
 pub struct AudioTuning {
         _hangover: Duration,
+        _voiceThreshold: u16,
         _isReportEnabled: bool,
 }
 
@@ -62,12 +64,23 @@ impl AudioTuning {
         pub fn getHangover(&self) -> Duration { self._hangover }
         pub fn isReportEnabled(&self) -> bool { self._isReportEnabled }
 
+        // Make the speech gate for one speaker that a receiver hears.
+        pub fn NewGate(&self) -> SpeechGate {
+                SpeechGate::New(self._voiceThreshold, self._hangover)
+        }
+
         // `hangover` is how long a bot keeps sending after speech stops, so
-        // that the ends of words are not cut. `is_report_enabled` turns on
-        // the receive reports, which log numbers about each speaker's audio.
-        pub fn New(hangover: Duration, is_report_enabled: bool) -> Self {
+        // that the ends of words are not cut. `voice_threshold` is the level
+        // that starts speech. `is_report_enabled` turns on the receive
+        // reports, which log numbers about each speaker's audio.
+        pub fn New(
+                hangover: Duration,
+                voice_threshold: u16,
+                is_report_enabled: bool,
+        ) -> Self {
                 Self {
                         _hangover: hangover,
+                        _voiceThreshold: voice_threshold,
                         _isReportEnabled: is_report_enabled,
                 }
         }

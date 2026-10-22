@@ -27,7 +27,8 @@ use symphonia_core::io::MediaSource;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
-use super::{SEND_QUEUE, SpeakerFrame, VoiceTarget};
+use super::{AudioTuning, SEND_QUEUE, SpeakerFrame, VoiceTarget};
+use crate::audio::gate::SpeechGate;
 use crate::audio::{AudioFrame, CHANNELS, FRAME_LEN, SAMPLE_RATE, TakeFrames};
 use crate::gateway::VoiceServer;
 
@@ -126,10 +127,10 @@ struct LevelStats {
 
 // What the receiver keeps for one speaker. `_pending` is the part of their
 // audio that is shorter than one frame, until their next packet completes
-// it.
-#[derive(Default)]
+// it. `_gate` passes only their speech.
 struct SpeakerState {
         _pending: Vec<i16>,
+        _gate: SpeechGate,
         _stats: ReceiveStats,
 }
 
@@ -141,6 +142,7 @@ struct VoiceReceiver {
         _speakers: Mutex<HashMap<String, SpeakerState>>,
         _ownBotIds: Arc<HashSet<String>>,
         _isListening: Arc<AtomicBool>,
+        _tuning: AudioTuning,
         _isReportEnabled: bool,
         _heard: mpsc::Sender<SpeakerFrame>,
 }
@@ -258,7 +260,7 @@ impl VoiceReceiver {
         // frames. A packet can hold more than one frame: the web client and
         // Vesktop send 40 or 60 ms packets when a camera uses the bandwidth.
         // Skip streams that are not the audio stream of a user, bridge bots,
-        // and digital silence.
+        // and audio that is not speech (see SpeechGate).
         fn Forward(
                 &self,
                 streams: &StreamMap,
@@ -268,12 +270,24 @@ impl VoiceReceiver {
         ) {
                 let Some(user) = streams.getAudioUser(ssrc) else { return };
                 if self._ownBotIds.contains(user) { return; }
-                let speaker = speakers.entry(user.clone()).or_default();
+                let speaker = speakers
+                        .entry(user.clone())
+                        .or_insert_with(|| SpeakerState::New(self._tuning));
                 if self._isReportEnabled { speaker._stats.Record(data); }
                 let Some(pcm) = &data.decoded_voice else { return };
                 for frame in TakeFrames(&mut speaker._pending, pcm) {
-                        if frame.isSilent() { continue; }
+                        if !speaker._gate.Pass(&frame) { continue; }
                         let _ = self._heard.try_send((user.clone(), frame));
+                }
+        }
+}
+
+impl SpeakerState {
+        fn New(tuning: AudioTuning) -> Self {
+                Self {
+                        _pending: Vec::new(),
+                        _gate: tuning.NewGate(),
+                        _stats: ReceiveStats::default(),
                 }
         }
 }
@@ -649,6 +663,7 @@ fn AddReceiveEvents(
                 _speakers: Mutex::new(HashMap::new()),
                 _ownBotIds: target.getOwnBotIds(),
                 _isListening: is_listening,
+                _tuning: tuning,
                 _isReportEnabled: tuning.isReportEnabled(),
                 _heard: target.getHeard(),
         };

@@ -23,7 +23,8 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
-use super::{SEND_QUEUE, SpeakerFrame, VoiceTarget};
+use super::{AudioTuning, SEND_QUEUE, SpeakerFrame, VoiceTarget};
+use crate::audio::gate::SpeechGate;
 use crate::audio::{
         AudioFrame, CHANNELS, FRAME_LEN, FRAME_TIME, SAMPLE_RATE,
         SAMPLES_PER_CHANNEL, mixer,
@@ -61,6 +62,7 @@ pub struct FluxerVoice {
 struct ReceiveState {
         _isListening: AtomicBool,
         _ownBotIds: Arc<HashSet<String>>,
+        _tuning: AudioTuning,
         _heard: mpsc::Sender<SpeakerFrame>,
 }
 
@@ -176,14 +178,20 @@ impl ReceiveState {
                 Self {
                         _isListening: AtomicBool::new(false),
                         _ownBotIds: target.getOwnBotIds(),
+                        _tuning: target.getTuning(),
                         _heard: target.getHeard(),
                 }
         }
 
-        // Give a frame to the bridge. Skip digital silence, so that a bot
-        // that hears nobody does not keep its mirrors speaking.
-        fn Forward(&self, user: &str, frame: AudioFrame) {
-                if frame.isSilent() { return; }
+        // Give a frame to the bridge. Skip audio that is not speech, so that
+        // background noise does not keep the mirrors speaking.
+        fn Forward(
+                &self,
+                user: &str,
+                frame: AudioFrame,
+                gate: &mut SpeechGate,
+        ) {
+                if !gate.Pass(&frame) { return; }
                 let _ = self._heard.try_send((user.to_string(), frame));
         }
 }
@@ -358,6 +366,7 @@ async fn RunTrackReader(
                 CHANNELS as i32,
         );
         let mut pending: Vec<i16> = Vec::with_capacity(FRAME_LEN * 2);
+        let mut gate = receive._tuning.NewGate();
         while let Some(chunk) = stream.next().await {
                 if !receive.isListening() { break; }
                 pending.extend_from_slice(&chunk.data);
@@ -365,7 +374,7 @@ async fn RunTrackReader(
                         let frame =
                                 AudioFrame::FromStereo(&pending[..FRAME_LEN]);
                         pending.drain(..FRAME_LEN);
-                        receive.Forward(&user, frame);
+                        receive.Forward(&user, frame, &mut gate);
                 }
         }
         debug!(%user, "Fluxer track reader stopped");

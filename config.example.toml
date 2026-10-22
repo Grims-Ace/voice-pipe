@@ -50,8 +50,14 @@ log_level = "info"
 # false.
 audio_reports = false
 
+# Level (RMS, 0 to 32768) that a person's audio must reach to start speech.
+# Quieter background noise is not relayed, so the mirrors do not look like
+# an open microphone. Quiet sounds inside speech are still relayed. 0 relays
+# all audio. Default 50.
+voice_threshold = 50
+
 # Time (ms) that a bot keeps sending after speech stops, so that the ends of
-# words are not cut. Default 300.
+# words are not cut. The speech gate also uses it. Default 300.
 silence_hangover_ms = 300
 
 # Frames (20 ms each) that the overflow mixer buffers for each speaker.

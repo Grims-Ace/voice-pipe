@@ -12,7 +12,6 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
-use serde::de::IgnoredAny;
 use tracing::warn;
 
 use crate::platform::{PLATFORMS, Platform};
@@ -43,6 +42,8 @@ const DEFAULT_PROXY_IDLE_NAME: &str = "Voice Pipe Proxy {number}";
 const DEFAULT_LOG_LEVEL: &str = "info";
 const DEFAULT_STATE_FILE: &str = "voice-pipe-state.toml";
 const DEFAULT_HANGOVER_MS: u64 = 300;
+// About -56 dBFS: above the noise of a quiet room, far below speech.
+const DEFAULT_VOICE_THRESHOLD: u16 = 50;
 const DEFAULT_JITTER_FRAMES: usize = 3;
 // Shortest hangover. Below one 20 ms frame, playback stops after each frame.
 const HANGOVER_MIN_MS: u64 = 20;
@@ -75,10 +76,8 @@ pub struct GeneralSettings {
         _logLevel: String,
         #[serde(rename = "audio_reports")]
         _isAudioReportEnabled: bool,
-        // Removed setting. It is still read, so that an old config file
-        // loads, and Validate tells the operator to remove it.
         #[serde(rename = "voice_threshold")]
-        _removedVoiceThreshold: Option<IgnoredAny>,
+        _voiceThreshold: u16,
         #[serde(rename = "silence_hangover_ms")]
         _silenceHangoverMs: u64,
         #[serde(rename = "jitter_frames")]
@@ -165,6 +164,11 @@ impl GeneralSettings {
                 self._isAudioReportEnabled
         }
 
+        // Return the level (root mean square, 0 to 32768) that a frame must
+        // reach to start speech. 0 lets all audio that is not digital
+        // silence through.
+        pub fn getVoiceThreshold(&self) -> u16 { self._voiceThreshold }
+
         pub fn getSilenceHangover(&self) -> Duration {
                 Duration::from_millis(self._silenceHangoverMs)
         }
@@ -181,12 +185,6 @@ impl GeneralSettings {
         fn Validate(&mut self) -> Result<()> {
                 if self._commandPrefix.trim().is_empty() {
                         bail!("general.command_prefix must not be empty");
-                }
-                if self._removedVoiceThreshold.is_some() {
-                        warn!(
-                                "general.voice_threshold is no longer used, \
-                                 remove it from the config"
-                        );
                 }
                 if self._silenceHangoverMs < HANGOVER_MIN_MS {
                         warn!(
@@ -215,7 +213,7 @@ impl Default for GeneralSettings {
                         _proxyIdleName: DEFAULT_PROXY_IDLE_NAME.into(),
                         _logLevel: DEFAULT_LOG_LEVEL.into(),
                         _isAudioReportEnabled: false,
-                        _removedVoiceThreshold: None,
+                        _voiceThreshold: DEFAULT_VOICE_THRESHOLD,
                         _silenceHangoverMs: DEFAULT_HANGOVER_MS,
                         _jitterFrames: DEFAULT_JITTER_FRAMES,
                 }
@@ -570,12 +568,13 @@ mod tests {
         }
 
         #[test]
-        fn OldVoiceThresholdStillLoads() {
+        fn VoiceThresholdIsRead() {
                 let text = MINIMAL.replace(
                         "[discord]",
                         "[general]\nvoice_threshold = 200\n[discord]",
                 );
-                Parse(&text);
+                let config = Parse(&text);
+                assert_eq!(config.getGeneral().getVoiceThreshold(), 200);
         }
 
         #[test]

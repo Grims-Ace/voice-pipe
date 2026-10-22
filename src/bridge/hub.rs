@@ -263,6 +263,7 @@ impl Hub {
                 Ok(Arc::new(Hub {
                         _tuning: AudioTuning::New(
                                 general.getSilenceHangover(),
+                                general.getVoiceThreshold(),
                                 general.isAudioReportEnabled(),
                         ),
                         _isEnabled: AtomicBool::new(is_enabled),
