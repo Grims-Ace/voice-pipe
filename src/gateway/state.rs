@@ -80,12 +80,6 @@ impl VoiceFlags {
                 Self { _isMuted: is_muted, _isDeafened: is_deafened }
         }
 
-        // Return the same flags without the deafen. A bot that listens must
-        // not deafen, because then the server sends it no audio.
-        pub fn WithoutDeafen(self) -> Self {
-                Self { _isDeafened: false, ..self }
-        }
-
         fn FromData(data: &VoiceStateData) -> Self {
                 Self::New(
                         data.mute || data.self_mute,

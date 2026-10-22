@@ -231,16 +231,14 @@ impl Side {
 
         // Show the mute and deafen state of each person on their single
         // proxy. A group bot speaks for many people, so it never shows them.
-        // The listener never deafens, because a deafened bot gets no audio.
+        // A deafened bot gets no audio, but ChooseListener prefers a proxy
+        // that is not deafened. If all are deafened, nobody on the other
+        // platform can hear this channel, so its audio is not necessary.
         pub fn ApplyVoiceFlags(&mut self) {
                 let channel = self._key.getChannelId(self._platform);
                 for (user, session) in self._proxies.iter_mut() {
                         let flags = self._userFlags.get(user).copied();
-                        let mut flags = flags.unwrap_or_default();
-                        if self._listener == Some(Listener::Proxy(user.clone()))
-                        {
-                                flags = flags.WithoutDeafen();
-                        }
+                        let flags = flags.unwrap_or_default();
                         session.ShowVoiceFlags(channel, flags);
                 }
         }
@@ -804,7 +802,7 @@ impl Side {
         }
 
         // Prefer the group bot, then a proxy whose person is not deafened,
-        // so that the listener can show the deafen of its person.
+        // because a deafened bot gets no audio.
         fn ChooseListener(&self) -> Option<Listener> {
                 let group = self._group.as_ref();
                 if group.is_some_and(|g| g.getVoice().isConnected()) {

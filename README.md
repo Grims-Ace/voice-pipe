@@ -36,9 +36,10 @@ The bridge uses two types of bot on each platform:
   shows a Discord user. A proxy also shows when its person is muted or
   deafened. A group bot speaks for many people, so it never shows a mute or
   a deafen. One bot in each channel is the listener, which receives the
-  audio of that channel. A deafened bot gets no audio, so the listener
-  never shows a deafen. The bridge prefers a proxy whose person is not
-  deafened as the listener, so normally all deafens show.
+  audio of that channel. A deafened bot gets no audio, so the bridge
+  prefers a proxy whose person is not deafened as the listener. When all
+  the people on the other platform are deafened, nobody can hear the
+  channel, so a deafened listener loses nothing.
 
 ### Single proxies and group bots
 
