@@ -11,6 +11,8 @@
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 
+use super::state::VoiceFlags;
+
 // ============================================================================
 // Opcodes and Intents
 // ============================================================================
@@ -89,9 +91,9 @@ pub struct ChannelData {
         pub position: Option<i64>,
 }
 
-// `mute` is set by a moderator. `self_mute` is set by the user. Only Fluxer
-// sends `connection_id`, because one Fluxer user can have many voice
-// connections.
+// `mute` and `deaf` are set by a moderator. `self_mute` and `self_deaf` are
+// set by the user. Only Fluxer sends `connection_id`, because one Fluxer user
+// can have many voice connections.
 #[derive(Debug, Default, Deserialize)]
 pub struct VoiceStateData {
         #[serde(default)]
@@ -108,6 +110,10 @@ pub struct VoiceStateData {
         pub mute: bool,
         #[serde(default)]
         pub self_mute: bool,
+        #[serde(default)]
+        pub deaf: bool,
+        #[serde(default)]
+        pub self_deaf: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -200,21 +206,20 @@ pub fn BuildHeartbeat(sequence: Option<u64>) -> String {
 }
 
 // Join a voice channel, or leave voice when `channel_id` is None. A second
-// update for the same channel changes only the mute state. Fluxer needs
-// `connection_id` to know which voice connection of the bot to change.
+// update for the same channel changes only the mute and deafen state. Fluxer
+// needs `connection_id` to know which voice connection of the bot to change.
 // Discord has no connection ID, so the key is sent only when it is known.
-// The bots never deafen.
 pub fn BuildVoiceState(
         guild_id: &str,
         channel_id: Option<&str>,
-        is_muted: bool,
+        flags: VoiceFlags,
         connection_id: Option<&str>,
 ) -> String {
         let mut data = json!({
                 "guild_id": guild_id,
                 "channel_id": channel_id,
-                "self_mute": is_muted,
-                "self_deaf": false,
+                "self_mute": flags.isMuted(),
+                "self_deaf": flags.isDeafened(),
         });
         if let Some(id) = connection_id {
                 data["connection_id"] = json!(id);
@@ -251,7 +256,8 @@ mod tests {
 
         #[test]
         fn LeaveSendsNullChannel() {
-                let text = BuildVoiceState("g", None, false, None);
+                let text =
+                        BuildVoiceState("g", None, VoiceFlags::default(), None);
                 let v: Value = serde_json::from_str(&text).unwrap();
                 assert_eq!(v["op"], 4);
                 assert!(v["d"]["channel_id"].is_null());
@@ -260,11 +266,21 @@ mod tests {
 
         #[test]
         fn MuteUpdateCarriesConnectionId() {
-                let text = BuildVoiceState("g", Some("c"), true, Some("x1"));
+                let muted = VoiceFlags::New(true, false);
+                let text = BuildVoiceState("g", Some("c"), muted, Some("x1"));
                 let v: Value = serde_json::from_str(&text).unwrap();
                 assert_eq!(v["d"]["self_mute"], true);
                 assert_eq!(v["d"]["self_deaf"], false);
                 assert_eq!(v["d"]["connection_id"], "x1");
+        }
+
+        #[test]
+        fn DeafenUpdateSetsSelfDeaf() {
+                let deafened = VoiceFlags::New(true, true);
+                let text = BuildVoiceState("g", Some("c"), deafened, None);
+                let v: Value = serde_json::from_str(&text).unwrap();
+                assert_eq!(v["d"]["self_mute"], true);
+                assert_eq!(v["d"]["self_deaf"], true);
         }
 
         #[test]

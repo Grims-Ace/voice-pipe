@@ -221,7 +221,7 @@ impl Side {
         // ====================================================================
 
         // Make the mirrors in this channel match `people`, the people in the
-        // linked channel on the other platform. Keep their mute
+        // linked channel on the other platform. Keep their mute and deafen
         // state for ApplyVoiceFlags.
         pub fn Sync(&mut self, people: &HashMap<String, VoiceFlags>) {
                 self._userFlags = people.clone();
@@ -229,15 +229,25 @@ impl Side {
                 self.SyncUsers(&users);
         }
 
-        // Show the mute state of each person on their single proxy. A group
-        // bot speaks for many people, so it never shows a mute.
+        // Show the mute and deafen state of each person on their single
+        // proxy. A group bot speaks for many people, so it never shows them.
+        // The listener never deafens, because a deafened bot gets no audio.
         pub fn ApplyVoiceFlags(&mut self) {
                 let channel = self._key.getChannelId(self._platform);
                 for (user, session) in self._proxies.iter_mut() {
                         let flags = self._userFlags.get(user).copied();
-                        let flags = flags.unwrap_or_default();
+                        let mut flags = flags.unwrap_or_default();
+                        if self._listener == Some(Listener::Proxy(user.clone()))
+                        {
+                                flags = flags.WithoutDeafen();
+                        }
                         session.ShowVoiceFlags(channel, flags);
                 }
+        }
+
+        // Return true if the person that `user`'s proxy shows is deafened.
+        fn isUserDeafened(&self, user: &str) -> bool {
+                self._userFlags.get(user).is_some_and(|f| f.isDeafened())
         }
 
         fn SyncUsers(&mut self, users: &HashSet<String>) {
@@ -751,17 +761,20 @@ impl Side {
         }
 
         // Make one bot listen while audio is active, and none while it is
-        // not. Choose a new listener when the old one leaves.
+        // not. Choose a new listener when the old one leaves, or when its
+        // person deafens and another bot can listen in its place.
         pub fn UpdateListener(&mut self, is_active: bool) {
                 if !is_active {
                         self.StopListening();
                         return;
                 }
-                if self.getListenerVoice().is_some_and(|v| v.isConnected()) {
-                        return;
-                }
+                let voice = self.getListenerVoice();
+                let is_connected = voice.is_some_and(|v| v.isConnected());
+                if is_connected && !self.isListenerDeafened() { return; }
+                let choice = self.ChooseListener();
+                if is_connected && choice == self._listener { return; }
                 self.StopListening();
-                self._listener = self.ChooseListener();
+                self._listener = choice;
                 let Some(voice) = self.getListenerVoice() else { return };
                 voice.SetListening(true);
                 info!(platform = %self._platform, "listener chosen");
@@ -782,6 +795,16 @@ impl Side {
                 }
         }
 
+        // Return true if the listener is a proxy whose person is deafened.
+        fn isListenerDeafened(&self) -> bool {
+                let Some(Listener::Proxy(user)) = &self._listener else {
+                        return false;
+                };
+                self.isUserDeafened(user)
+        }
+
+        // Prefer the group bot, then a proxy whose person is not deafened,
+        // so that the listener can show the deafen of its person.
         fn ChooseListener(&self) -> Option<Listener> {
                 let group = self._group.as_ref();
                 if group.is_some_and(|g| g.getVoice().isConnected()) {
@@ -789,7 +812,8 @@ impl Side {
                 }
                 self._proxies
                         .iter()
-                        .find(|(_, s)| s.getVoice().isConnected())
+                        .filter(|(_, s)| s.getVoice().isConnected())
+                        .min_by_key(|(user, _)| self.isUserDeafened(user))
                         .map(|(user, _)| Listener::Proxy(user.clone()))
         }
 }

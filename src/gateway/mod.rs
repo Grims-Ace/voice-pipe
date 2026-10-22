@@ -296,6 +296,7 @@ impl GatewayShared {
                         channel = ?voice.channel_id,
                         connection = ?voice.connection_id,
                         is_muted = voice.self_mute,
+                        is_deafened = voice.self_deaf,
                         "voice state of this bot",
                 );
                 let mut slot = self._connectionId.lock().unwrap();
@@ -485,7 +486,7 @@ impl Gateway {
                         });
                 let channel = Some(channel_id);
                 let payload = protocol::BuildVoiceState(
-                        guild_id, channel, false, None,
+                        guild_id, channel, VoiceFlags::default(), None,
                 );
                 self.Send(payload)?;
                 let label = &self._label;
@@ -547,7 +548,7 @@ impl Gateway {
                 let payload = protocol::BuildVoiceState(
                         guild_id,
                         None,
-                        false,
+                        VoiceFlags::default(),
                         connection.as_deref(),
                 );
                 if let Err(e) = self.Send(payload) {
@@ -559,8 +560,8 @@ impl Gateway {
                 }
         }
 
-        // Change the mute state of the bot. The bot stays in `channel_id`,
-        // the channel that it is in now.
+        // Change the mute and deafen state of the bot. The bot stays in
+        // `channel_id`, the channel that it is in now.
         pub fn SetVoiceFlags(
                 &self,
                 guild_id: &str,
@@ -571,7 +572,7 @@ impl Gateway {
                 self.Send(protocol::BuildVoiceState(
                         guild_id,
                         Some(channel_id),
-                        flags.isMuted(),
+                        flags,
                         connection.as_deref(),
                 ))
         }

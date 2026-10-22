@@ -33,9 +33,12 @@ The bridge uses two types of bot on each platform:
 - **Proxy bots** (zero or more for each platform). A proxy copies the
   nickname and avatar of one person from the other platform and joins voice
   as that person. A proxy on Discord shows a Fluxer user. A proxy on Fluxer
-  shows a Discord user. A proxy also shows when its person is muted. Deafen
-  is not shown, because a deafened bot can stop getting the audio that it
-  relays. A group bot speaks for many people, so it never shows a mute.
+  shows a Discord user. A proxy also shows when its person is muted or
+  deafened. A group bot speaks for many people, so it never shows a mute or
+  a deafen. One bot in each channel is the listener, which receives the
+  audio of that channel. A deafened bot gets no audio, so the listener
+  never shows a deafen. The bridge prefers a proxy whose person is not
+  deafened as the listener, so normally all deafens show.
 
 ### Single proxies and group bots
 
@@ -260,8 +263,8 @@ Optional settings:
 | `general.ignore_afk_channels` | `true` | Do not link AFK channels by name |
 | `general.overflow_name` | `Multiple Users` | Nickname of a group bot |
 | `general.proxy_idle_name` | `Voice Pipe Proxy {number}` | Nickname of a free proxy |
-| `general.voice_threshold` | `50` | Level (RMS, 0 to 32768) that starts speech; `0` sends all audio |
-| `general.silence_hangover_ms` | `300` | Send time after speech stops (minimum 20) |
+| `general.voice_threshold` | `50` | Level that starts speech, in 16-bit RMS amplitude (50 is about -56 dBFS); `0` sends all audio |
+| `general.silence_hangover_ms` | `300` | Send time after speech stops, in milliseconds (minimum 20) |
 | `general.jitter_frames` | `3` | Overflow mixer buffer (20 ms frames) |
 | `general.audio_reports` | `false` | Log a receive report (packets, loss, levels, stereo) for each Discord speaker every 10 s |
 | `discord.command_role_ids` | `[]` | Discord roles that can use toggle, link, confirm, and unlink |
@@ -272,6 +275,32 @@ Optional settings:
 
 The bridge checks the config when it starts and stops with a clear message
 if a required value is missing.
+
+### Units of the audio settings
+
+**`voice_threshold`** is a root mean square (RMS) amplitude of 16-bit audio
+samples, measured over each 20 ms frame. The scale is linear: 0 is digital
+silence and 32768 is full scale. To change a level in dBFS (decibels below
+full scale) to this unit, use `32768 × 10^(dBFS / 20)`.
+
+| `voice_threshold` | dBFS | Typical sound (approximate) |
+| ---: | ---: | :--- |
+| 10 | -70 | Very quiet room, noise suppression on |
+| 33 | -60 | Quiet room |
+| 50 | -56 | Default |
+| 100 | -50 | Fan or computer noise |
+| 330 | -40 | Quiet speech |
+| 1000 | -30 | Normal speech |
+| 3300 | -20 | Loud speech |
+
+The level is measured after decoding, so it is the level that the sender's
+client sends, after its own gain and noise suppression. With
+`audio_reports = true`, the `rms` value of a receive report uses the same
+unit.
+
+**`silence_hangover_ms`** is a time in milliseconds. The speech gate counts
+it in 20 ms frames and rounds down, so 300 ms is 15 frames and 310 ms is
+also 15 frames.
 
 ## Build and run
 

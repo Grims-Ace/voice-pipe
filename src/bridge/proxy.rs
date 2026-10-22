@@ -273,21 +273,25 @@ impl ProxySession {
         }
         pub fn getVoice(&self) -> &VoiceConnection { &self._voice }
 
-        // Show a mute state on the proxy in `channel_id`, the channel that
-        // it is in. Send it only when it changes.
+        // Show a mute and deafen state on the proxy in `channel_id`, the
+        // channel that it is in. Send it only when it changes.
         pub fn ShowVoiceFlags(&mut self, channel_id: &str, flags: VoiceFlags) {
                 if flags == self._voiceFlags { return; }
                 let bot = self._account.getBotId();
                 let gateway = &self._gateway;
                 match gateway.SetVoiceFlags(&self._guildId, channel_id, flags) {
                         Ok(()) => {
-                                let is_muted = flags.isMuted();
-                                info!(%bot, is_muted, "proxy mute changed");
+                                info!(
+                                        %bot,
+                                        is_muted = flags.isMuted(),
+                                        is_deafened = flags.isDeafened(),
+                                        "proxy voice state changed",
+                                );
                                 self._voiceFlags = flags;
                         }
                         Err(e) => {
                                 let error = format!("{e:#}");
-                                warn!(%bot, %error, "cannot set mute state");
+                                warn!(%bot, %error, "cannot set voice state");
                         }
                 }
         }

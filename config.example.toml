@@ -50,14 +50,19 @@ log_level = "info"
 # false.
 audio_reports = false
 
-# Level (RMS, 0 to 32768) that a person's audio must reach to start speech.
-# Quieter background noise is not relayed, so the mirrors do not look like
-# an open microphone. Quiet sounds inside speech are still relayed. 0 relays
-# all audio. Default 50.
+# Level that a person's audio must reach to start speech. Quieter background
+# noise is not relayed, so the mirrors do not look like an open microphone.
+# Quiet sounds inside speech are still relayed. 0 relays all audio.
+# Unit: RMS amplitude of 16-bit samples over a 20 ms frame, linear from 0
+# (silence) to 32768 (full scale). From dBFS: 32768 x 10^(dBFS / 20).
+# 33 = -60 dBFS, 50 = -56 dBFS, 100 = -50 dBFS, 1000 = -30 dBFS (speech).
+# Default 50.
 voice_threshold = 50
 
-# Time (ms) that a bot keeps sending after speech stops, so that the ends of
-# words are not cut. The speech gate also uses it. Default 300.
+# Time that a bot keeps sending after speech stops, so that the ends of
+# words are not cut. The speech gate also uses it. Unit: milliseconds
+# (minimum 20). The speech gate counts it in 20 ms frames and rounds down.
+# Default 300.
 silence_hangover_ms = 300
 
 # Frames (20 ms each) that the overflow mixer buffers for each speaker.

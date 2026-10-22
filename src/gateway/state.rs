@@ -19,13 +19,14 @@ pub struct VoiceChannel {
 }
 
 // The voice state of a user that a proxy shows. The user counts as muted
-// when the user or a moderator muted them. Deafen is not shown.
+// or deafened when the user or a moderator did it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct VoiceFlags {
         _isMuted: bool,
+        _isDeafened: bool,
 }
 
-// The voice channel of a user and their mute state.
+// The voice channel of a user and their mute and deafen state.
 struct UserVoice {
         _channelId: String,
         _flags: VoiceFlags,
@@ -73,11 +74,23 @@ impl VoiceChannel {
 
 impl VoiceFlags {
         pub fn isMuted(&self) -> bool { self._isMuted }
+        pub fn isDeafened(&self) -> bool { self._isDeafened }
 
-        pub fn New(is_muted: bool) -> Self { Self { _isMuted: is_muted } }
+        pub fn New(is_muted: bool, is_deafened: bool) -> Self {
+                Self { _isMuted: is_muted, _isDeafened: is_deafened }
+        }
+
+        // Return the same flags without the deafen. A bot that listens must
+        // not deafen, because then the server sends it no audio.
+        pub fn WithoutDeafen(self) -> Self {
+                Self { _isDeafened: false, ..self }
+        }
 
         fn FromData(data: &VoiceStateData) -> Self {
-                Self::New(data.mute || data.self_mute)
+                Self::New(
+                        data.mute || data.self_mute,
+                        data.deaf || data.self_deaf,
+                )
         }
 }
 
@@ -264,10 +277,30 @@ mod tests {
                 };
                 state.ApplyVoiceState(&muted);
                 let users = state.getChannelUsers("g", "c1");
-                assert_eq!(users["u1"], VoiceFlags::New(true));
+                assert_eq!(users["u1"], VoiceFlags::New(true, false));
                 state.ApplyVoiceState(&VoiceState("u1", Some("c1")));
                 let users = state.getChannelUsers("g", "c1");
                 assert_eq!(users["u1"], VoiceFlags::default());
+        }
+
+        #[test]
+        fn VoiceStateRecordsDeafen() {
+                let mut state = GatewayState::default();
+                let deafened = VoiceStateData {
+                        self_mute: true,
+                        self_deaf: true,
+                        ..VoiceState("u1", Some("c1"))
+                };
+                state.ApplyVoiceState(&deafened);
+                let users = state.getChannelUsers("g", "c1");
+                assert_eq!(users["u1"], VoiceFlags::New(true, true));
+                let moderated = VoiceStateData {
+                        deaf: true,
+                        ..VoiceState("u1", Some("c1"))
+                };
+                state.ApplyVoiceState(&moderated);
+                let users = state.getChannelUsers("g", "c1");
+                assert!(users["u1"].isDeafened());
         }
 
         #[test]
