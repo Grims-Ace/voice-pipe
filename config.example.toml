@@ -119,17 +119,23 @@ proxy_tokens = [
 # in discord.command_role_ids count too (see above).
 command_role_ids = []
 
-# Fluxer runs on this machine, so the bridge talks to it on the local edge
-# port and does not go through Cloudflare or nginx. The defaults are for a
+# The defaults are for Fluxer on this machine: the bridge talks to the local
+# edge port and does not go through Cloudflare or nginx. They are for a
 # stack that binds 127.0.0.1:8080 (FLUXER_EDGE_BIND). Change the port if
 # your stack uses another one.
+#
+# For Fluxer on another machine, use the URLs of that server, for example
+# "https://chat.example.com/api/v1" and
+# "wss://chat.example.com/gateway?v=1&encoding=json". Use https:// and
+# wss://, because the tokens are visible on the network with http:// and
+# ws://. See "Fluxer on another machine" in the README.
 api_url = "http://127.0.0.1:8080/api/v1"
 gateway_url = "ws://127.0.0.1:8080/gateway?v=1&encoding=json"
 
 # LiveKit signaling URL for voice. The default sends signaling to the local
 # edge. Set it to "" to use the public URL that Fluxer sends (this goes
-# through Cloudflare and nginx). Voice media always uses UDP 7882 or
-# TCP 7881 directly.
+# through Cloudflare and nginx). Use "" for Fluxer on another machine.
+# Voice media always uses UDP 7882 or TCP 7881 directly.
 livekit_url = "ws://127.0.0.1:8080/livekit"
 
 # Avatar image URL. {user_id} and {hash} are replaced. Use the same host and

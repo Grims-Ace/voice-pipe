@@ -120,7 +120,8 @@ use a proxy as their group bot.
 
 ### Fluxer traffic stays local
 
-Fluxer runs on the same machine as the bridge:
+By default, Fluxer runs on the same machine as the bridge (see
+[Fluxer on another machine](#fluxer-on-another-machine) for other setups):
 
 | Traffic | Default address |
 | :--- | :--- |
@@ -234,6 +235,35 @@ not use that path for Fluxer. Check these items:
    the router.
 
 The bridge needs no public port of its own.
+
+### Fluxer on another machine
+
+The bridge can connect to a Fluxer server on another machine, for example
+a server on your LAN or a public Fluxer server. Change these settings in
+the `[fluxer]` part of `config.toml`:
+
+| Setting | Value for a public server at `chat.example.com` |
+| :--- | :--- |
+| `api_url` | `https://chat.example.com/api/v1` |
+| `gateway_url` | `wss://chat.example.com/gateway?v=1&encoding=json` |
+| `livekit_url` | `""` (use the URL that Fluxer sends) |
+| `avatar_url` | The avatar URL that the Fluxer web app uses |
+| `host_header` | `""` (not necessary when the URL has the host name) |
+
+Use the same host names and paths that the Fluxer web app uses. To find
+them, open the network tab of the browser developer tools in the web app.
+
+- **Use `https://` and `wss://`.** The bot tokens go in each request. With
+  `http://` or `ws://` to another machine, anybody on the network path can
+  read them. The bridge writes a warning at start for each URL like this.
+  A plain URL is acceptable only on a network that you trust.
+- **Certificates.** The bridge accepts only certificates from a public
+  certificate authority (for example Let's Encrypt or Cloudflare). A
+  self-signed certificate does not work.
+- **Voice media.** The bridge connects to LiveKit UDP 7882 (or TCP 7881)
+  on the Fluxer server, so these ports must be open from the bridge
+  machine. The hairpin NAT item above does not apply.
+- **Latency.** Each extra network hop adds delay to the relayed audio.
 
 ## Configure
 
