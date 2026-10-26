@@ -16,6 +16,7 @@ mod config;
 mod gateway;
 mod platform;
 mod rest;
+mod retry;
 mod voice;
 
 use std::path::PathBuf;

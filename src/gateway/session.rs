@@ -25,6 +25,7 @@ use tracing::{debug, error, info, warn};
 use super::protocol::{self, Hello, Incoming, ParseData, Ready};
 use super::{ChatMessage, GatewaySettings, GatewayShared};
 use crate::platform::Platform;
+use crate::retry::RetryDelay;
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -34,7 +35,6 @@ type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 const HELLO_TIMEOUT: Duration = Duration::from_secs(20);
-const MAX_BACKOFF: Duration = Duration::from_secs(60);
 // Shortest time between two status updates. Fluxer accepts 5 updates in 20
 // seconds and drops more without an error.
 const STATUS_INTERVAL: Duration = Duration::from_secs(5);
@@ -91,6 +91,7 @@ pub(super) struct SessionTask {
         _stop: watch::Receiver<bool>,
         _session: SessionInfo,
         _failures: u32,
+        _outageSince: Option<Instant>,
 }
 
 impl SessionTask {
@@ -114,6 +115,7 @@ impl SessionTask {
                         _stop: stop,
                         _session: SessionInfo::default(),
                         _failures: 0,
+                        _outageSince: None,
                 }
         }
 
@@ -121,7 +123,11 @@ impl SessionTask {
         // Connection Life Cycle
         // ====================================================================
 
-        // Keep the session open until a stop request or a fatal error.
+        // Keep the session open until a stop request. After a lost
+        // connection, connect again on the retry schedule (see RetryDelay).
+        // A refused login (such as an intent that is off) also tries again,
+        // because the operator can fix it on the platform while the bridge
+        // runs.
         pub(super) async fn Run(mut self) {
                 let label = self._settings.getLabel().to_string();
                 loop {
@@ -131,14 +137,17 @@ impl SessionTask {
                                         error!(
                                                 gateway = %label,
                                                 %reason,
-                                                "gateway stopped",
+                                                "gateway cannot log in",
                                         );
-                                        break;
+                                        self._session = SessionInfo::default();
                                 }
                                 ConnectionEnd::Reconnect => {}
                         }
                         self._failures += 1;
-                        let wait = Backoff(self._failures);
+                        let since = *self._outageSince.get_or_insert_with(
+                                Instant::now,
+                        );
+                        let wait = RetryDelay(self._failures, since.elapsed());
                         warn!(
                                 gateway = %label,
                                 wait_secs = wait.as_secs(),
@@ -384,7 +393,7 @@ impl SessionTask {
                 match kind {
                         "READY" => self.HandleReady(&frame.d),
                         "RESUMED" => {
-                                self._failures = 0;
+                                self.EndOutage();
                                 self._isLoggedIn = true;
                                 info!(
                                         gateway = %self._settings.getLabel(),
@@ -406,13 +415,25 @@ impl SessionTask {
                 let Some(ready) = ParseData::<Ready>(data) else { return };
                 self._session._sessionId = Some(ready.session_id);
                 self._session._resumeUrl = ready.resume_gateway_url;
-                self._failures = 0;
+                self.EndOutage();
                 self._isLoggedIn = true;
                 self._isStatusDue = true;
                 info!(
                         gateway = %self._settings.getLabel(),
                         "gateway logged in",
                 );
+        }
+
+        // The bot is logged in, so the next lost connection starts the retry
+        // schedule from the beginning.
+        fn EndOutage(&mut self) {
+                if self._outageSince.take().is_some() {
+                        info!(
+                                gateway = %self._settings.getLabel(),
+                                "gateway connected again",
+                        );
+                }
+                self._failures = 0;
         }
 
         // A session that cannot resume must log in again from the start.
@@ -540,12 +561,6 @@ fn BuildResumeUrl(resume: &str, base: &str) -> String {
         format!("{}/?{query}", resume.trim_end_matches('/'))
 }
 
-// Exponential delay: 2, 4, 8, ... seconds, with a 60 second limit.
-fn Backoff(failures: u32) -> Duration {
-        Duration::from_secs(2u64.saturating_pow(failures.min(6)))
-                .min(MAX_BACKOFF)
-}
-
 #[cfg(test)]
 mod tests {
         use super::*;
@@ -557,11 +572,5 @@ mod tests {
                         "wss://x/?v=10&encoding=json",
                 );
                 assert_eq!(url, "wss://resume.discord.gg/?v=10&encoding=json");
-        }
-
-        #[test]
-        fn BackoffHasLimit() {
-                assert_eq!(Backoff(1), Duration::from_secs(2));
-                assert_eq!(Backoff(20), MAX_BACKOFF);
         }
 }

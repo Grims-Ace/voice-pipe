@@ -10,7 +10,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, anyhow};
 use futures_util::future::join_all;
 use tokio::sync::{mpsc, watch};
 use tracing::{info, warn};
@@ -54,24 +53,17 @@ impl Coordinator {
                 }
         }
 
-        // Run until a stop request, or until a main gateway closes.
-        pub async fn Run(
-                mut self,
-                mut stop: watch::Receiver<bool>,
-        ) -> Result<()> {
+        // Run until a stop request. A main gateway that loses its connection
+        // connects again by itself, so the links keep running.
+        pub async fn Run(mut self, mut stop: watch::Receiver<bool>) {
                 let hub = self._hub.clone();
                 let discord = hub.getPlatform(Platform::Discord).getGateway();
                 let fluxer = hub.getPlatform(Platform::Fluxer).getGateway();
                 let mut tick = tokio::time::interval(RECONCILE_INTERVAL);
                 info!("bridge is watching voice channels");
-                let result = loop {
-                        if discord.isClosed() || fluxer.isClosed() {
-                                break Err(anyhow!(
-                                        "a main bot gateway closed"
-                                ));
-                        }
+                loop {
                         let heard = tokio::select! {
-                                _ = stop.wait_for(|stop| *stop) => break Ok(()),
+                                _ = stop.wait_for(|stop| *stop) => break,
                                 _ = discord.Changed() => None,
                                 _ = fluxer.Changed() => None,
                                 _ = tick.tick() => None,
@@ -87,9 +79,8 @@ impl Coordinator {
                         }
                         self._chat.CheckTimeout();
                         self.Reconcile();
-                };
+                }
                 self.StopAll().await;
-                result
         }
 
         // ====================================================================

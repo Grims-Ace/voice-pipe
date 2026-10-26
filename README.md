@@ -154,9 +154,22 @@ linked voice channels on both platforms. A status changes at most once in
 Each bot has its own gateway connection, and all bots stay logged in while
 the bridge runs. A proxy joins voice when it gets a person and leaves voice
 when that person leaves, but it stays online. When a connection drops, the
-bridge connects again and resumes the session, so voice continues. If a main bot connection cannot recover, the
-bridge logs out all bots and starts again, with a delay that increases
-after each failure (4 s up to 2 min).
+bridge connects again and resumes the session, so voice continues.
+
+A bot that cannot connect tries again on this schedule:
+
+| Time since the connection was lost | Wait between attempts |
+| :--- | :--- |
+| First minute | 2, 4, 8, 16, then 32 seconds |
+| Up to 5 minutes | 1 minute |
+| After 5 minutes | 10 minutes |
+
+A bot also tries again after the server refuses its login, for example
+when an intent is not turned on in the Discord developer portal. Then you
+can correct the setting on the platform while the bridge runs. Each refused
+login writes an error to the log. A new token in `config.toml` needs a
+restart of the bridge. If the bridge cannot start (for example, Discord
+cannot be reached), it starts again on the same schedule.
 
 ## Requirements
 
