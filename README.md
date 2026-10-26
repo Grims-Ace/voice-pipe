@@ -17,6 +17,7 @@ voice in both directions.
   - [Step 3: Network setup](#step-3-network-setup)
   - [Step 4: Configure](#step-4-configure)
   - [Step 5: Run](#step-5-run)
+    - [Run natively](#run-natively)
     - [Run with Docker](#run-with-docker)
 - [Commands](#commands)
 - [How the bridge works](#how-the-bridge-works)
@@ -277,6 +278,10 @@ also 15 frames.
 
 ### Step 5: Run
 
+Run the binary directly (natively), or run it in Docker.
+
+#### Run natively
+
 In the directory with the binary and `config.toml`:
 
 ```sh
@@ -293,7 +298,7 @@ working directory by default), and `config.toml` when the link commands
 change it. The user that runs the bridge must be able to write to
 `config.toml` and to the directories of both files.
 
-#### Logs
+##### Logs
 
 ```sh
 RUST_LOG=info,voice_pipe=debug ./voice-pipe
@@ -304,7 +309,7 @@ WebRTC) log only warnings, because Songbird writes several lines each time
 a person starts or stops speaking. `RUST_LOG` replaces the whole filter,
 so it also shows the library logs.
 
-#### Run as a systemd service
+##### Run as a systemd service
 
 This example uses `/opt/voice-pipe` for the binary and `config.toml`, and
 a `voice-pipe` user that owns that directory.
