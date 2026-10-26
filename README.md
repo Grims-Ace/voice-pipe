@@ -17,6 +17,7 @@ voice in both directions.
   - [Step 3: Network setup](#step-3-network-setup)
   - [Step 4: Configure](#step-4-configure)
   - [Step 5: Run](#step-5-run)
+    - [Run with Docker](#run-with-docker)
 - [Commands](#commands)
 - [How the bridge works](#how-the-bridge-works)
 - [Troubleshooting](#troubleshooting)
