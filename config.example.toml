@@ -10,8 +10,8 @@
 # General settings
 # -----------------------------------------------------------------------------
 [general]
-# Prefix for the Discord chat commands. With "vp!" the commands are
-# vp!help, vp!toggle, and vp!status.
+# Prefix for the chat commands on both platforms. With "vp!" the commands
+# are vp!help, vp!status, vp!toggle, vp!link, vp!confirm, and vp!unlink.
 command_prefix = "vp!"
 
 # Start with the bridge on (true) or off (false). vp!toggle changes it.
@@ -103,13 +103,15 @@ command_role_ids = []
 # gateway_url = "wss://gateway.discord.gg/?v=10&encoding=json"
 
 # -----------------------------------------------------------------------------
-# Fluxer (self-hosted, on this machine)
+# Fluxer
 # -----------------------------------------------------------------------------
 [fluxer]
-# Community (guild) ID of your Fluxer server.
+# Community (guild) ID of your Fluxer community.
 guild_id = ""
 
-# Token of the main Fluxer bot.
+# Token of the main Fluxer bot. It watches the voice channels, answers the
+# commands, and joins voice as "Multiple Users" when there are not enough
+# proxies for all users in a channel.
 main_token = ""
 
 # Tokens of the Fluxer proxy bots. Each proxy copies the name and avatar of
@@ -122,32 +124,35 @@ proxy_tokens = [
 # in discord.command_role_ids count too (see above).
 command_role_ids = []
 
-# The defaults are for Fluxer on this machine: the bridge talks to the local
-# edge port and does not go through Cloudflare or nginx. They are for a
-# stack that binds 127.0.0.1:8080 (FLUXER_EDGE_BIND). Change the port if
-# your stack uses another one.
+# Fluxer URLs. The defaults are for a self-hosted Fluxer on this machine,
+# with a stack that binds 127.0.0.1:8080 (FLUXER_EDGE_BIND). The bridge
+# then talks to Fluxer directly, not through a reverse proxy.
 #
-# For Fluxer on another machine, use the URLs of that server, for example
-# "https://chat.example.com/api/v1" and
-# "wss://chat.example.com/gateway?v=1&encoding=json". Use https:// and
-# wss://, because the tokens are visible on the network with http:// and
-# ws://. See "Fluxer on another machine" in the README.
+# For the official instance (fluxer.app), use:
+#   api_url = "https://api.fluxer.app/v1"
+#   gateway_url = "wss://gateway.fluxer.app/?v=1&encoding=json"
+#   livekit_url = ""
+#   avatar_url = "https://fluxerusercontent.com/avatars/{user_id}/{hash}.png?size=128"
+#
+# For Fluxer on another machine, use the URLs of that server. Use https://
+# and wss://, because the tokens are visible on the network with http://
+# and ws://. See "Step 3: Network setup" in the README.
 api_url = "http://127.0.0.1:8080/api/v1"
 gateway_url = "ws://127.0.0.1:8080/gateway?v=1&encoding=json"
 
-# LiveKit signaling URL for voice. The default sends signaling to the local
-# edge. Set it to "" to use the public URL that Fluxer sends (this goes
-# through Cloudflare and nginx). Use "" for Fluxer on another machine.
-# Voice media always uses UDP 7882 or TCP 7881 directly.
+# LiveKit signaling URL for voice. Set it to "" to use the URL that Fluxer
+# sends for each call (use "" for any instance that is not on this
+# machine).
 livekit_url = "ws://127.0.0.1:8080/livekit"
 
 # Avatar image URL. {user_id} and {hash} are replaced. Use the same host and
 # path that the Fluxer web app uses for avatars.
 avatar_url = "http://127.0.0.1:8080/media/avatars/{user_id}/{hash}.png?size=128"
 
-# Host header for local requests. Set this to your public host name (for
-# example "chat.example.com") if the Fluxer edge routes requests by host
-# name and does not answer on 127.0.0.1. Leave empty if it is not needed.
+# Host header for requests to a Fluxer on this machine. Set this to your
+# public host name (for example "chat.example.com") if the Fluxer edge
+# routes requests by host name and does not answer on 127.0.0.1. Leave
+# empty if it is not needed.
 host_header = ""
 
 # -----------------------------------------------------------------------------
