@@ -12,6 +12,7 @@ use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 
 use super::state::VoiceFlags;
+use crate::platform::Platform;
 
 // ============================================================================
 // Opcodes and Intents
@@ -20,6 +21,7 @@ use super::state::VoiceFlags;
 pub const OP_DISPATCH: u8 = 0;
 pub const OP_HEARTBEAT: u8 = 1;
 pub const OP_IDENTIFY: u8 = 2;
+pub const OP_PRESENCE_UPDATE: u8 = 3;
 pub const OP_VOICE_STATE_UPDATE: u8 = 4;
 pub const OP_RESUME: u8 = 6;
 pub const OP_RECONNECT: u8 = 7;
@@ -35,6 +37,8 @@ pub const INTENT_MESSAGE_CONTENT: u64 = 1 << 15;
 
 // Discord channel types for voice and stage channels.
 const VOICE_CHANNEL_TYPES: [u8; 2] = [2, 13];
+// Longest custom status text on Fluxer (characters).
+pub const STATUS_MAX: usize = 128;
 
 // ============================================================================
 // Incoming Payloads
@@ -120,6 +124,8 @@ pub struct VoiceStateData {
 pub struct GuildCreate {
         pub id: String,
         #[serde(default)]
+        pub name: Option<String>,
+        #[serde(default)]
         pub afk_channel_id: Option<String>,
         #[serde(default)]
         pub channels: Vec<ChannelData>,
@@ -132,6 +138,8 @@ pub struct GuildCreate {
 pub struct GuildUpdate {
         #[serde(alias = "guild_id")]
         pub id: String,
+        #[serde(default)]
+        pub name: Option<String>,
         // None when the update does not include the key. Some(None) when
         // the guild removed its AFK channel.
         #[serde(default, deserialize_with = "ReadPresentValue")]
@@ -227,6 +235,32 @@ pub fn BuildVoiceState(
         json!({ "op": OP_VOICE_STATE_UPDATE, "d": data }).to_string()
 }
 
+// Show the bot as online with a custom status text. Discord sets it as an
+// activity of type 4 (custom status). Fluxer has its own custom status
+// object. Text longer than STATUS_MAX characters is cut.
+pub fn BuildPresence(platform: Platform, text: &str) -> String {
+        let text: String = text.chars().take(STATUS_MAX).collect();
+        let data = match platform {
+                Platform::Discord => json!({
+                        "since": null,
+                        "activities": [{
+                                "name": "Custom Status",
+                                "type": 4,
+                                "state": text,
+                        }],
+                        "status": "online",
+                        "afk": false,
+                }),
+                Platform::Fluxer => json!({
+                        "status": "online",
+                        "afk": false,
+                        "mobile": false,
+                        "custom_status": { "text": text },
+                }),
+        };
+        json!({ "op": OP_PRESENCE_UPDATE, "d": data }).to_string()
+}
+
 // Tell a key that is missing (None, from the default) from a key that is
 // null (Some(None)).
 fn ReadPresentValue<'de, D: Deserializer<'de>>(
@@ -272,6 +306,27 @@ mod tests {
                 assert_eq!(v["d"]["self_mute"], true);
                 assert_eq!(v["d"]["self_deaf"], false);
                 assert_eq!(v["d"]["connection_id"], "x1");
+        }
+
+        #[test]
+        fn DiscordPresenceIsCustomActivity() {
+                let text = BuildPresence(Platform::Discord, "Standing By");
+                let v: Value = serde_json::from_str(&text).unwrap();
+                assert_eq!(v["op"], 3);
+                assert_eq!(v["d"]["status"], "online");
+                assert_eq!(v["d"]["activities"][0]["type"], 4);
+                assert_eq!(v["d"]["activities"][0]["state"], "Standing By");
+        }
+
+        #[test]
+        fn FluxerPresenceHasCustomStatus() {
+                let long = "x".repeat(200);
+                let text = BuildPresence(Platform::Fluxer, &long);
+                let v: Value = serde_json::from_str(&text).unwrap();
+                assert_eq!(v["op"], 3);
+                assert_eq!(v["d"]["status"], "online");
+                let status = v["d"]["custom_status"]["text"].as_str().unwrap();
+                assert_eq!(status.chars().count(), STATUS_MAX);
         }
 
         #[test]

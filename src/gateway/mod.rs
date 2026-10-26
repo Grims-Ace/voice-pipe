@@ -110,6 +110,7 @@ pub struct Gateway {
         _isSessionRequired: bool,
         _shared: Arc<GatewayShared>,
         _outgoing: mpsc::UnboundedSender<String>,
+        _status: watch::Sender<Option<String>>,
         _stop: watch::Sender<bool>,
         _task: Mutex<Option<JoinHandle<()>>>,
         _messages: Mutex<Option<mpsc::Receiver<ChatMessage>>>,
@@ -359,6 +360,10 @@ impl Gateway {
                 self._shared._state.lock().unwrap().hasGuild(guild_id)
         }
 
+        pub fn getGuildName(&self, guild_id: &str) -> Option<String> {
+                self._shared._state.lock().unwrap().getGuildName(guild_id)
+        }
+
         pub fn getAfkChannelId(&self, guild_id: &str) -> Option<String> {
                 self._shared._state.lock().unwrap().getAfkChannelId(guild_id)
         }
@@ -394,6 +399,7 @@ impl Gateway {
                 });
                 let (outgoing_tx, outgoing_rx) = mpsc::unbounded_channel();
                 let (messages_tx, messages_rx) = mpsc::channel(MESSAGE_QUEUE);
+                let (status_tx, status_rx) = watch::channel(None);
                 let (stop_tx, stop_rx) = watch::channel(false);
                 let label = settings._label.clone();
                 let is_session_required = settings.isSessionRequired();
@@ -402,6 +408,7 @@ impl Gateway {
                         shared.clone(),
                         outgoing_rx,
                         messages_tx,
+                        status_rx,
                         stop_rx,
                 );
                 Gateway {
@@ -409,6 +416,7 @@ impl Gateway {
                         _isSessionRequired: is_session_required,
                         _shared: shared,
                         _outgoing: outgoing_tx,
+                        _status: status_tx,
                         _stop: stop_tx,
                         _task: Mutex::new(Some(tokio::spawn(task.Run()))),
                         _messages: Mutex::new(Some(messages_rx)),
@@ -575,6 +583,18 @@ impl Gateway {
                         flags,
                         connection.as_deref(),
                 ))
+        }
+
+        // Show `text` as the custom status of the bot. The session task
+        // sends it when the bot is logged in, again after each new login,
+        // and not more often than the rate limit allows. The same text
+        // again sends nothing.
+        pub fn SetStatus(&self, text: &str) {
+                self._status.send_if_modified(|current| {
+                        if current.as_deref() == Some(text) { return false; }
+                        *current = Some(text.to_string());
+                        true
+                });
         }
 
         // Send the queued messages, log out, and wait for the task to end.

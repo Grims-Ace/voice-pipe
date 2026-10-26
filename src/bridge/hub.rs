@@ -17,7 +17,7 @@ use tracing::{error, info};
 
 use super::fixed_links::FixedLinks;
 use super::link::LinkKey;
-use super::proxy::{ProxyAccount, ProxyPool};
+use super::proxy::{PROXY_INTENTS, ProxyAccount, ProxyPool};
 use super::saved;
 use crate::config::{Config, GeneralSettings, PlatformSettings};
 use crate::gateway::{
@@ -41,8 +41,6 @@ pub struct PlatformHub {
         _platform: Platform,
         _guildId: String,
         _mainBotId: String,
-        _gatewayUrl: String,
-        _hostHeader: Option<String>,
         _livekitUrl: Option<String>,
         _gateway: Gateway,
         _rest: RestClient,
@@ -133,10 +131,9 @@ impl PlatformHub {
                 let main_id = rest.FetchSelfId().await.with_context(|| {
                         format!("{platform} login failed, check token, api_url")
                 })?;
-                let tokens = settings.getProxyTokens();
                 let general = config.getGeneral();
                 let proxies =
-                        FetchProxies(&rest, tokens, &main_id, general).await;
+                        FetchProxies(&rest, settings, &main_id, general).await;
                 let guild_id = settings.getGuildId();
                 join_all(proxies.iter().map(|p| p.SetIdleName(guild_id))).await;
                 let mut bot_ids: HashSet<String> = proxies
@@ -159,8 +156,6 @@ impl PlatformHub {
                         _platform: platform,
                         _guildId: settings.getGuildId().to_string(),
                         _mainBotId: main_id,
-                        _gatewayUrl: settings.getGatewayUrl().to_string(),
-                        _hostHeader: settings.getHostHeader().map(String::from),
                         _livekitUrl: settings.getLivekitUrl().map(String::from),
                         _gateway: gateway,
                         _rest: rest,
@@ -169,25 +164,6 @@ impl PlatformHub {
                         _leavingProxies: AtomicUsize::new(0),
                         _mainLink: Mutex::new(None),
                 })
-        }
-
-        // Make the gateway settings for another bot on this platform.
-        pub fn BuildGatewaySettings(
-                &self,
-                label: &str,
-                token: &str,
-                bot_id: &str,
-                intents: u64,
-        ) -> GatewaySettings {
-                GatewaySettings::New(
-                        label,
-                        self._platform,
-                        &self._gatewayUrl,
-                        token,
-                        intents,
-                        bot_id,
-                        self._hostHeader.as_deref(),
-                )
         }
 
         // Reserve the main bot for a link. The main bot can be in only one
@@ -217,6 +193,22 @@ impl PlatformHub {
         }
         pub fn HoldProxy(&self, account: ProxyAccount) {
                 self._proxies.lock().unwrap().Hold(account)
+        }
+
+        // Return the name of the guild, or the platform name when the server
+        // did not send it.
+        fn getGuildName(&self) -> String {
+                self._gateway
+                        .getGuildName(&self._guildId)
+                        .unwrap_or_else(|| self._platform.getTitle().into())
+        }
+
+        // Log out the main bot and the proxies that are in the pool. The
+        // links give their proxies back to the pool before this.
+        async fn Close(&self) {
+                let accounts = self._proxies.lock().unwrap().TakeAll();
+                let proxies = join_all(accounts.iter().map(|a| a.Close()));
+                tokio::join!(self._gateway.Close(), proxies);
         }
 }
 
@@ -274,12 +266,25 @@ impl Hub {
                 }))
         }
 
-        // Log out the main bots.
+        // Show the status of the main bots. `people` is the number of
+        // people in all linked voice channels on both platforms.
+        pub fn ShowMainStatus(&self, people: usize) {
+                let text = if people == 0 {
+                        format!(
+                                "Connecting {} to {}",
+                                self._discord.getGuildName(),
+                                self._fluxer.getGuildName(),
+                        )
+                } else {
+                        format!("Voice-piping {people}")
+                };
+                self._discord._gateway.SetStatus(&text);
+                self._fluxer._gateway.SetStatus(&text);
+        }
+
+        // Log out the main bots and all proxies.
         pub async fn Close(&self) {
-                tokio::join!(
-                        self._discord._gateway.Close(),
-                        self._fluxer._gateway.Close()
-                );
+                tokio::join!(self._discord.Close(), self._fluxer.Close());
         }
 }
 
@@ -320,13 +325,34 @@ fn BuildMainGatewaySettings(
         )
 }
 
-// Find the bot ID of each proxy token. Skip tokens that do not work.
+// A proxy needs only guild data and its own voice state.
+fn BuildProxyGatewaySettings(
+        platform: Platform,
+        settings: &PlatformSettings,
+        token: &str,
+        bot_id: &str,
+) -> GatewaySettings {
+        GatewaySettings::New(
+                &format!("{platform} proxy {bot_id}"),
+                platform,
+                settings.getGatewayUrl(),
+                token,
+                PROXY_INTENTS,
+                bot_id,
+                settings.getHostHeader(),
+        )
+}
+
+// Find the bot ID of each proxy token, and log in each proxy. Skip tokens
+// that do not work.
 async fn FetchProxies(
         rest: &RestClient,
-        tokens: &[String],
+        settings: &PlatformSettings,
         main_id: &str,
         general: &GeneralSettings,
 ) -> Vec<ProxyAccount> {
+        let platform = rest.getPlatform();
+        let tokens = settings.getProxyTokens();
         let lookups = tokens.iter().map(|token| async move {
                 let client = rest.WithToken(token);
                 (token, client.FetchSelfId().await, client)
@@ -341,8 +367,13 @@ async fn FetchProxies(
                         }
                         Ok(id) => {
                                 let name = general.getProxyIdleName(i + 1);
+                                let gateway = Gateway::Connect(
+                                        BuildProxyGatewaySettings(
+                                                platform, settings, token, &id,
+                                        ),
+                                );
                                 accounts.push(ProxyAccount::New(
-                                        token, &id, client, name,
+                                        &id, client, name, gateway,
                                 ));
                         }
                         Err(e) => {

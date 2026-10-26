@@ -25,7 +25,9 @@ use crate::voice::{VoiceConnection, VoiceTarget};
 // ============================================================================
 
 // Proxies need only guild data and their own voice state.
-const PROXY_INTENTS: u64 = INTENT_GUILDS | INTENT_GUILD_VOICE_STATES;
+pub const PROXY_INTENTS: u64 = INTENT_GUILDS | INTENT_GUILD_VOICE_STATES;
+// Status of a proxy that mirrors nobody.
+const IDLE_STATUS: &str = "Standing By";
 // Time limit for a proxy to log in and join voice.
 const OPEN_TIMEOUT: Duration = Duration::from_secs(30);
 // Time that a proxy waits after a failure before the pool gives it out again.
@@ -62,11 +64,12 @@ pub struct ProxyProfile {
         _avatar: Arc<Mutex<AvatarState>>,
 }
 
-// A proxy bot account.
+// A proxy bot account. Its gateway connection stays open while the bridge
+// runs, so that a free proxy shows that it is standing by.
 pub struct ProxyAccount {
-        _token: String,
         _idleName: Option<String>,
         _profile: ProxyProfile,
+        _gateway: Gateway,
 }
 
 // The proxy accounts of one platform that are not in use.
@@ -80,7 +83,6 @@ pub struct ProxyPool {
 // platform, or like the group of users that it speaks for.
 pub struct ProxySession {
         _account: ProxyAccount,
-        _gateway: Gateway,
         _voice: VoiceConnection,
         _guildId: String,
         _voiceFlags: VoiceFlags,
@@ -163,7 +165,8 @@ impl ProxyProfile {
                 warn!(bot = %self._botId, error = %e, "cannot remove avatar");
         }
 
-        // Set the nickname in the guild and remember it for the status.
+        // Set the nickname in the guild and remember it for the status
+        // command and the custom status.
         async fn SetNickname(&self, guild_id: &str, nickname: &str) {
                 *self._nickname.lock().unwrap() = nickname.to_string();
                 let (rest, bot) = (&self._rest, &self._botId);
@@ -183,19 +186,24 @@ impl ProxyAccount {
         pub fn getBotId(&self) -> &str { &self._profile._botId }
 
         // `idle_name` is the nickname of the proxy while it mirrors nobody.
+        // `gateway` is the open connection of the proxy.
         pub fn New(
-                token: &str,
                 bot_id: &str,
                 rest: RestClient,
                 idle_name: Option<String>,
+                gateway: Gateway,
         ) -> Self {
+                gateway.SetStatus(IDLE_STATUS);
                 Self {
-                        _token: token.to_string(),
                         _idleName: idle_name
                                 .map(|n| Truncate(&n, NICKNAME_MAX)),
                         _profile: ProxyProfile::New(rest, bot_id),
+                        _gateway: gateway,
                 }
         }
+
+        // Log out the proxy when the bridge stops.
+        pub async fn Close(&self) { self._gateway.Close().await; }
 
         // Set the idle nickname, so that a free proxy does not keep the
         // name of the last person or group that it mirrored.
@@ -242,6 +250,14 @@ impl ProxyPool {
                 self._free.push_back(account);
         }
 
+        // Take all accounts that are free or held, so that they can log out.
+        pub fn TakeAll(&mut self) -> Vec<ProxyAccount> {
+                let held = self._held.drain(..).map(|(_, account)| account);
+                let mut accounts: Vec<ProxyAccount> = held.collect();
+                accounts.extend(self._free.drain(..));
+                accounts
+        }
+
         // Hold back an account that failed, so that a bad account does not
         // fail again and again.
         pub fn Hold(&mut self, account: ProxyAccount) {
@@ -273,12 +289,17 @@ impl ProxySession {
         }
         pub fn getVoice(&self) -> &VoiceConnection { &self._voice }
 
+        // Show `text` as the custom status of the proxy.
+        pub fn ShowStatus(&self, text: &str) {
+                self._account._gateway.SetStatus(text);
+        }
+
         // Show a mute and deafen state on the proxy in `channel_id`, the
         // channel that it is in. Send it only when it changes.
         pub fn ShowVoiceFlags(&mut self, channel_id: &str, flags: VoiceFlags) {
                 if flags == self._voiceFlags { return; }
                 let bot = self._account.getBotId();
-                let gateway = &self._gateway;
+                let gateway = &self._account._gateway;
                 match gateway.SetVoiceFlags(&self._guildId, channel_id, flags) {
                         Ok(()) => {
                                 info!(
@@ -296,8 +317,8 @@ impl ProxySession {
                 }
         }
 
-        // Give the proxy the look of `look`, log it in, and join the channel
-        // of `target`. Give the account back on failure.
+        // Give the proxy the look of `look` and join the channel of
+        // `target`. Give the account back on failure.
         #[allow(clippy::result_large_err)]
         pub async fn Open(
                 hub: &Hub,
@@ -308,15 +329,8 @@ impl ProxySession {
         ) -> Result<ProxySession, ProxyAccount> {
                 account._profile.Apply(hub, platform, look).await;
                 let side = hub.getPlatform(platform);
-                let bot_id = account.getBotId();
-                let label = format!("{platform} proxy {bot_id}");
-                let gateway = Gateway::Connect(side.BuildGatewaySettings(
-                        &label,
-                        &account._token,
-                        bot_id,
-                        PROXY_INTENTS,
-                ));
-                let join = JoinVoice(&gateway, side.getGuildId(), target);
+                let guild_id = side.getGuildId();
+                let join = JoinVoice(&account._gateway, guild_id, target);
                 let joined = tokio::time::timeout(OPEN_TIMEOUT, join).await;
                 let error = match joined {
                         Ok(Ok(voice)) => {
@@ -329,24 +343,24 @@ impl ProxySession {
                                 );
                                 return Ok(ProxySession {
                                         _account: account,
-                                        _gateway: gateway,
                                         _voice: voice,
-                                        _guildId: side.getGuildId().to_string(),
+                                        _guildId: guild_id.to_string(),
                                         _voiceFlags: VoiceFlags::default(),
                                 });
                         }
                         Ok(Err(e)) => format!("{e:#}"),
                         Err(_) => "join timed out".to_string(),
                 };
-                Err(Fail(account, gateway, &error).await)
+                Err(Fail(account, guild_id, &error))
         }
 
-        // Leave voice, log out, and set the idle name. Return the account
-        // for the pool.
+        // Leave voice, set the idle name, and show that the proxy stands
+        // by. The proxy stays logged in. Return the account for the pool.
         pub async fn Close(self) -> ProxyAccount {
                 self._voice.Close().await;
-                self._gateway.LeaveVoice(&self._guildId);
-                self._gateway.Close().await;
+                let gateway = &self._account._gateway;
+                gateway.LeaveVoice(&self._guildId);
+                gateway.SetStatus(IDLE_STATUS);
                 self._account.SetIdleName(&self._guildId).await;
                 self._account
         }
@@ -365,14 +379,12 @@ async fn JoinVoice(
         VoiceConnection::Join(gateway, target).await
 }
 
-async fn Fail(
-        account: ProxyAccount,
-        gateway: Gateway,
-        reason: &str,
-) -> ProxyAccount {
+// Take a proxy out of voice after a failed join, because a join that timed
+// out can still finish on the server.
+fn Fail(account: ProxyAccount, guild_id: &str, reason: &str) -> ProxyAccount {
         let bot = account.getBotId();
         warn!(bot = %bot, %reason, "proxy could not join voice");
-        gateway.Close().await;
+        account._gateway.LeaveVoice(guild_id);
         account
 }
 

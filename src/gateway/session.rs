@@ -20,7 +20,7 @@ use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::{Error as SocketError, Message};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use super::protocol::{self, Hello, Incoming, ParseData, Ready};
 use super::{ChatMessage, GatewaySettings, GatewayShared};
@@ -35,6 +35,9 @@ type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 const HELLO_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
+// Shortest time between two status updates. Fluxer accepts 5 updates in 20
+// seconds and drops more without an error.
+const STATUS_INTERVAL: Duration = Duration::from_secs(5);
 
 // ============================================================================
 // Types
@@ -59,6 +62,8 @@ enum ConnectionEnd {
 enum Wake {
         Heartbeat,
         Outgoing(String),
+        StatusChanged,
+        StatusDue,
         Stop,
         Frame(Option<Result<Message, SocketError>>),
 }
@@ -71,12 +76,18 @@ enum LoopAction {
         End(ConnectionEnd),
 }
 
-// The background task that owns the gateway socket of one bot.
+// The background task that owns the gateway socket of one bot. `_status`
+// is the custom status that the bot must show. `_isStatusDue` is true when
+// the server does not show it yet.
 pub(super) struct SessionTask {
         _settings: GatewaySettings,
         _shared: Arc<GatewayShared>,
         _outgoing: mpsc::UnboundedReceiver<String>,
         _messages: mpsc::Sender<ChatMessage>,
+        _status: watch::Receiver<Option<String>>,
+        _isStatusDue: bool,
+        _statusSentAt: Option<Instant>,
+        _isLoggedIn: bool,
         _stop: watch::Receiver<bool>,
         _session: SessionInfo,
         _failures: u32,
@@ -88,6 +99,7 @@ impl SessionTask {
                 shared: Arc<GatewayShared>,
                 outgoing: mpsc::UnboundedReceiver<String>,
                 messages: mpsc::Sender<ChatMessage>,
+                status: watch::Receiver<Option<String>>,
                 stop: watch::Receiver<bool>,
         ) -> Self {
                 Self {
@@ -95,6 +107,10 @@ impl SessionTask {
                         _shared: shared,
                         _outgoing: outgoing,
                         _messages: messages,
+                        _status: status,
+                        _isStatusDue: false,
+                        _statusSentAt: None,
+                        _isLoggedIn: false,
                         _stop: stop,
                         _session: SessionInfo::default(),
                         _failures: 0,
@@ -135,6 +151,7 @@ impl SessionTask {
 
         // Open one socket, log in, and read events until the socket ends.
         async fn RunConnection(&mut self) -> ConnectionEnd {
+                self._isLoggedIn = false;
                 let mut socket = match self.Open().await {
                         Ok(socket) => socket,
                         Err(e) => {
@@ -181,11 +198,19 @@ impl SessionTask {
                 heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
                 let mut is_acked = true;
                 loop {
+                        let status_at = self.getStatusSendTime();
+                        let can_send_status =
+                                self._isStatusDue && self._isLoggedIn;
                         let wake = tokio::select! {
                                 _ = heartbeat.tick() => Wake::Heartbeat,
                                 Some(payload) = self._outgoing.recv() => {
                                         Wake::Outgoing(payload)
                                 }
+                                Ok(()) = self._status.changed() => {
+                                        Wake::StatusChanged
+                                }
+                                _ = tokio::time::sleep_until(status_at),
+                                        if can_send_status => Wake::StatusDue,
                                 _ = self._stop.wait_for(|s| *s) => Wake::Stop,
                                 frame = socket.next() => Wake::Frame(frame),
                         };
@@ -196,6 +221,11 @@ impl SessionTask {
                                 Wake::Outgoing(payload) => {
                                         LoopAction::Send(payload)
                                 }
+                                Wake::StatusChanged => {
+                                        self._isStatusDue = true;
+                                        LoopAction::Continue
+                                }
+                                Wake::StatusDue => self.TakeStatus(),
                                 Wake::Stop => {
                                         LoopAction::End(ConnectionEnd::Stop)
                                 }
@@ -228,6 +258,29 @@ impl SessionTask {
                         reason: "".into(),
                 };
                 let _ = socket.close(Some(frame)).await;
+        }
+
+        // Return the earliest time for the next status update.
+        fn getStatusSendTime(&self) -> Instant {
+                match self._statusSentAt {
+                        Some(at) => at + STATUS_INTERVAL,
+                        None => Instant::now(),
+                }
+        }
+
+        // Build the presence update for the newest status text.
+        fn TakeStatus(&mut self) -> LoopAction {
+                self._isStatusDue = false;
+                let text = self._status.borrow().clone();
+                let Some(text) = text else { return LoopAction::Continue };
+                self._statusSentAt = Some(Instant::now());
+                debug!(
+                        gateway = %self._settings.getLabel(),
+                        %text,
+                        "status sent",
+                );
+                let platform = self._settings.getPlatform();
+                LoopAction::Send(protocol::BuildPresence(platform, &text))
         }
 
         // Wait for the backoff time. Return true if a stop request came.
@@ -332,6 +385,7 @@ impl SessionTask {
                         "READY" => self.HandleReady(&frame.d),
                         "RESUMED" => {
                                 self._failures = 0;
+                                self._isLoggedIn = true;
                                 info!(
                                         gateway = %self._settings.getLabel(),
                                         "gateway resumed",
@@ -346,12 +400,15 @@ impl SessionTask {
                 LoopAction::Continue
         }
 
-        // Save the session values that a later resume needs.
+        // Save the session values that a later resume needs. A new session
+        // starts without a custom status, so send the status again.
         fn HandleReady(&mut self, data: &Value) {
                 let Some(ready) = ParseData::<Ready>(data) else { return };
                 self._session._sessionId = Some(ready.session_id);
                 self._session._resumeUrl = ready.resume_gateway_url;
                 self._failures = 0;
+                self._isLoggedIn = true;
+                self._isStatusDue = true;
                 info!(
                         gateway = %self._settings.getLabel(),
                         "gateway logged in",

@@ -126,6 +126,11 @@ impl Occupancy {
                 self._discordUsers.is_empty() && self._fluxerUsers.is_empty()
         }
 
+        // Return the number of people in both channels.
+        pub fn CountPeople(&self) -> usize {
+                self._discordUsers.len() + self._fluxerUsers.len()
+        }
+
         // Audio flows only when people are in both channels.
         pub fn hasBothSides(&self) -> bool {
                 !self._discordUsers.is_empty() && !self._fluxerUsers.is_empty()
@@ -322,7 +327,7 @@ impl Link {
 
         // Make both sides match the people in the opposite channel, turn
         // listening on only when both channels have people, and show the
-        // mute state of each person on their proxy.
+        // mute state and the custom status on each proxy.
         fn Sync(&mut self) {
                 let occupancy = self._occupancy.borrow().clone();
                 self._discord.Sync(occupancy.getUsers(Platform::Fluxer));
@@ -340,6 +345,8 @@ impl Link {
                 self._fluxer.UpdateListener(is_active);
                 self._discord.ApplyVoiceFlags();
                 self._fluxer.ApplyVoiceFlags();
+                self._discord.ApplyStatuses();
+                self._fluxer.ApplyStatuses();
                 self.PublishStatus(&occupancy);
         }
 

@@ -36,6 +36,7 @@ struct UserVoice {
 // voice. Text channels are never stored.
 #[derive(Default)]
 struct GuildState {
+        _name: Option<String>,
         _channels: HashMap<String, VoiceChannel>,
         _userVoices: HashMap<String, UserVoice>,
         _afkChannelId: Option<String>,
@@ -112,6 +113,11 @@ impl GatewayState {
                 self._guilds.contains_key(guild_id)
         }
 
+        // Return the name of a guild, if the server sent it.
+        pub fn getGuildName(&self, guild_id: &str) -> Option<String> {
+                self._guilds.get(guild_id)?._name.clone()
+        }
+
         // Return the AFK voice channel of a guild, if the guild has one.
         pub fn getAfkChannelId(&self, guild_id: &str) -> Option<String> {
                 self._guilds.get(guild_id)?._afkChannelId.clone()
@@ -159,6 +165,7 @@ impl GatewayState {
         // Replace the view of a guild with the full snapshot from the server.
         pub fn ApplyGuildCreate(&mut self, data: &GuildCreate) {
                 let mut guild = GuildState {
+                        _name: data.name.clone(),
                         _afkChannelId: data.afk_channel_id.clone(),
                         ..Default::default()
                 };
@@ -178,13 +185,16 @@ impl GatewayState {
                 self._guilds.insert(data.id.clone(), guild);
         }
 
-        // Change the AFK channel of a known guild. An update without the
-        // key keeps the old value. An update for an unknown guild does
-        // nothing, because only the snapshot can add a guild.
+        // Change the name and AFK channel of a known guild. An update
+        // without a key keeps the old value. An update for an unknown guild
+        // does nothing, because only the snapshot can add a guild.
         pub fn ApplyGuildUpdate(&mut self, data: &GuildUpdate) {
                 let Some(guild) = self._guilds.get_mut(&data.id) else {
                         return;
                 };
+                if let Some(name) = &data.name {
+                        guild._name = Some(name.clone());
+                }
                 if let Some(afk) = &data.afk_channel_id {
                         guild._afkChannelId = afk.clone();
                 }
@@ -364,6 +374,23 @@ mod tests {
                 assert_eq!(state.getAfkChannelId("g"), None);
                 state.ApplyGuildUpdate(&update(json!({"id": "other"})));
                 assert!(!state.hasGuild("other"));
+        }
+
+        #[test]
+        fn GuildNameComesFromSnapshotAndUpdate() {
+                let mut state = GatewayState::default();
+                let snapshot: GuildCreate = serde_json::from_value(
+                        json!({"id": "g", "name": "Lounge"}),
+                )
+                .unwrap();
+                state.ApplyGuildCreate(&snapshot);
+                assert_eq!(state.getGuildName("g").as_deref(), Some("Lounge"));
+                let update: GuildUpdate = serde_json::from_value(
+                        json!({"guild_id": "g", "name": "Den"}),
+                )
+                .unwrap();
+                state.ApplyGuildUpdate(&update);
+                assert_eq!(state.getGuildName("g").as_deref(), Some("Den"));
         }
 
         #[test]

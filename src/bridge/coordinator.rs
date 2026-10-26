@@ -96,13 +96,15 @@ impl Coordinator {
         // Links
         // ====================================================================
 
-        // Start, update, and stop links to match the people in the channels.
+        // Start, update, and stop links to match the people in the channels,
+        // and show the number of people on the main bots.
         fn Reconcile(&mut self) {
                 self._stopping.retain(|(_, handle)| !handle.isFinished());
                 let pairs = self.FindPairs();
                 let found: HashSet<LinkKey> =
                         pairs.iter().map(|p| p.getKey().clone()).collect();
                 let mut wanted: HashSet<LinkKey> = HashSet::new();
+                let mut people = 0;
                 let is_enabled = self._hub.isEnabled();
                 for pair in pairs.iter().filter(|_| is_enabled) {
                         let occupancy = self.FindOccupancy(pair.getKey());
@@ -112,10 +114,12 @@ impl Coordinator {
                                 self.UpdateLink(pair.getKey(), occupancy);
                                 continue;
                         }
+                        people += occupancy.CountPeople();
                         wanted.insert(pair.getKey().clone());
                         self.EnsureLink(pair, occupancy);
                 }
                 self.StopUnwanted(&wanted, &found);
+                self._hub.ShowMainStatus(people);
         }
 
         // Find the channel pairs, and warn once about channel names that

@@ -243,6 +243,20 @@ impl Side {
                 }
         }
 
+        // Show on each proxy the person that it mirrors, or the number of
+        // people when it is the group bot. The main bot shows the status of
+        // the whole bridge (see Hub::ShowMainStatus).
+        pub fn ApplyStatuses(&self) {
+                for session in self._proxies.values() {
+                        let name = session.getNickname();
+                        session.ShowStatus(&format!("Proxying {name}"));
+                }
+                if let Some(GroupBot::Proxy(session)) = &self._group {
+                        let count = self._groupUsers.len();
+                        session.ShowStatus(&format!("Proxying {count}"));
+                }
+        }
+
         // Return true if the person that `user`'s proxy shows is deafened.
         fn isUserDeafened(&self, user: &str) -> bool {
                 self._userFlags.get(user).is_some_and(|f| f.isDeafened())

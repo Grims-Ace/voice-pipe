@@ -135,12 +135,26 @@ By default, Fluxer runs on the same machine as the bridge (see
 
 Discord traffic goes to Discord over the internet as usual.
 
+### Bot statuses
+
+Each bot shows a custom status on both platforms:
+
+| Bot | Bridge not in use | Bridge in use |
+| :--- | :--- | :--- |
+| Main bot | `Connecting <Discord server> to <Fluxer server>` | `Voice-piping <number of people>` |
+| Proxy | `Standing By` | `Proxying <name of the person>` |
+| Proxy as group bot | `Standing By` | `Proxying <number of people>` |
+
+The number on the main bots counts the people (not the bots) in all
+linked voice channels on both platforms. A status changes at most once in
+5 seconds for each bot, because both platforms limit status updates.
+
 ### Gateway connections
 
-Each bot has its own gateway connection. A main bot keeps its connection
-open. A proxy logs in when it gets a person and logs out when that person
-leaves. When a connection drops, the bridge connects again and resumes the
-session, so voice continues. If a main bot connection cannot recover, the
+Each bot has its own gateway connection, and all bots stay logged in while
+the bridge runs. A proxy joins voice when it gets a person and leaves voice
+when that person leaves, but it stays online. When a connection drops, the
+bridge connects again and resumes the session, so voice continues. If a main bot connection cannot recover, the
 bridge logs out all bots and starts again, with a delay that increases
 after each failure (4 s up to 2 min).
 
