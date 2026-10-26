@@ -38,6 +38,10 @@ const DEFAULT_CONFIG_PATH: &str = "config.toml";
 // LiveKit and WebRTC make very large futures. A large stack prevents a stack
 // overflow when the runtime runs them.
 const THREAD_STACK_SIZE: usize = 32 * 1024 * 1024;
+// Libraries that log only warnings unless RUST_LOG says otherwise. Songbird
+// writes several info lines each time a person starts or stops speaking.
+const QUIET_LIBRARIES: &str = "songbird=warn,livekit=warn,\
+        livekit_signaling=warn,livekit_api=warn,libwebrtc=warn";
 // Time limit for the bots to leave voice before the process stops.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 
@@ -91,11 +95,13 @@ fn ParseConfigPath(args: &[String]) -> Result<PathBuf> {
         Ok(PathBuf::from(path))
 }
 
-// Use RUST_LOG if it is set, else the level from the config. Songbird logs
-// an error for each packet that it cannot decode, so turn that log off.
+// Use RUST_LOG if it is set, else the level from the config with quiet
+// libraries. Songbird logs an error for each packet that it cannot decode,
+// so turn that log off.
 fn StartLogging(level: &str) {
+        let configured = format!("{level},{QUIET_LIBRARIES}");
         let filter = EnvFilter::try_from_default_env()
-                .or_else(|_| EnvFilter::try_new(level))
+                .or_else(|_| EnvFilter::try_new(configured))
                 .unwrap_or_else(|_| EnvFilter::new("info"))
                 .add_directive(
                         "songbird::driver::tasks::udp_rx=off"
@@ -151,6 +157,13 @@ mod tests {
 
         fn Args(items: &[&str]) -> Vec<String> {
                 items.iter().map(|s| s.to_string()).collect()
+        }
+
+        #[test]
+        fn QuietLibraryFilterIsValid() {
+                let text = format!("info,{QUIET_LIBRARIES}");
+                assert!(!text.contains(char::is_whitespace));
+                assert!(EnvFilter::try_new(text).is_ok());
         }
 
         #[test]

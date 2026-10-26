@@ -104,9 +104,11 @@ use a proxy as their group bot.
 
 ### Audio only when it is necessary
 
-- Bots do not decode or subscribe to audio until people are in both
-  channels. On Discord the voice driver does not decrypt or decode. On
-  Fluxer the bot does not subscribe to any audio track.
+- Bots relay audio only when people are in both channels, and only one
+  bot on each side (the listener) gives its audio to the bridge. On
+  Fluxer the other bots do not subscribe to any audio track. On Discord
+  the voice library (Songbird) decodes the audio on every bot in voice,
+  but the bridge ignores it on all bots except the listener.
 - Only voice is relayed. On Fluxer the bot does not subscribe to the audio
   of a screen share.
 - A speech gate for each person decides what is sent. A frame louder than
@@ -387,6 +389,11 @@ Log detail:
 ```sh
 RUST_LOG=info,voice_pipe=debug ./target/release/voice-pipe
 ```
+
+With `log_level` from the config, the voice libraries (Songbird, LiveKit,
+WebRTC) log only warnings, because Songbird writes several lines each time
+a person starts or stops speaking. `RUST_LOG` replaces the whole filter,
+so it also shows the library logs.
 
 ### Run as a systemd service
 

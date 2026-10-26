@@ -142,6 +142,10 @@ impl Side {
                 self._isMainOpening || self._isGroupProxyOpening
         }
 
+        // Return true while a group bot is in voice, so that the link mixes
+        // audio for it.
+        pub fn hasGroup(&self) -> bool { self._group.is_some() }
+
         // Return true while a group bot is in voice or connects.
         fn isGroupActive(&self) -> bool {
                 self._group.is_some() || self.isGroupOpening()

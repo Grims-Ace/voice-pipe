@@ -41,7 +41,10 @@ overflow_name = "Multiple Users"
 proxy_idle_name = "Voice Pipe Proxy {number}"
 
 # Log filter: error, warn, info, debug, or a tracing filter such as
-# "info,voice_pipe=debug". The RUST_LOG variable replaces this value.
+# "info,voice_pipe=debug". The voice libraries (Songbird, LiveKit, WebRTC)
+# log only warnings with this setting, because Songbird writes several
+# lines each time a person starts or stops speaking. The RUST_LOG variable
+# replaces this value and shows the library logs too.
 log_level = "info"
 
 # Log a "receive report" for each Discord speaker every 10 seconds: packets,

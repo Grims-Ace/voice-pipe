@@ -259,6 +259,11 @@ impl Link {
                 mix_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
                 let mut check_tick = tokio::time::interval(CHECK_INTERVAL);
                 loop {
+                        // The mix timer runs only for a group bot, so that
+                        // a link with single proxies does not wake every
+                        // 20 ms.
+                        let is_mixing = self._discord.hasGroup()
+                                || self._fluxer.hasGroup();
                         let wake = tokio::select! {
                                 _ = self._stop.wait_for(|s| *s) => Wake::Stop,
                                 Ok(()) = self._occupancy.changed() => {
@@ -273,7 +278,7 @@ impl Link {
                                 Some(heard) = self._heardOnFluxer.recv() => {
                                         Wake::Heard(Platform::Fluxer, heard)
                                 }
-                                _ = mix_tick.tick() => Wake::Mix,
+                                _ = mix_tick.tick(), if is_mixing => Wake::Mix,
                                 _ = check_tick.tick() => Wake::Check,
                         };
                         if !self.HandleWake(wake) { break; }
