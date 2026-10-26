@@ -135,7 +135,7 @@ impl PlatformHub {
                 let proxies =
                         FetchProxies(&rest, settings, &main_id, general).await;
                 let guild_id = settings.getGuildId();
-                join_all(proxies.iter().map(|p| p.SetIdleName(guild_id))).await;
+                join_all(proxies.iter().map(|p| p.ShowIdle(guild_id))).await;
                 let mut bot_ids: HashSet<String> = proxies
                         .iter()
                         .map(|p| p.getBotId().to_string())

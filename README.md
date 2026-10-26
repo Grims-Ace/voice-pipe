@@ -98,8 +98,9 @@ use a proxy as their group bot.
    For a group, the speakers are mixed together and the group bot plays
    the mix.
 3. **A person leaves.** Their mirror leaves, and the proxy gets its idle
-   nickname again (`Voice Pipe Proxy 1`, `Voice Pipe Proxy 2`, ...). When
-   both channels are empty, the link stops and all of its bots leave.
+   nickname again (`Voice Pipe Proxy 1`, `Voice Pipe Proxy 2`, ...) and
+   the default avatar of its bot account. When both channels are empty,
+   the link stops and all of its bots leave.
 
 ### Audio only when it is necessary
 
@@ -510,8 +511,9 @@ example below, `/opt/voice-pipe`).
   Discord proxies for all of them to show by name. With fewer, all 5 share
   one group bot.
 - **Rate limits.** Nicknames and avatars change through the API. The
-  bridge copies an avatar only when a proxy gets a different person.
-  Discord and Fluxer can still delay many quick changes.
+  bridge sends an avatar change only when the avatar must change: a
+  different person, a group, or the default avatar when the proxy is
+  free. Discord and Fluxer can still delay many quick changes.
 - **Speech start.** After silence, the first 20 to 60 ms of speech can be
   lost while the receivers fill their buffers. This is the cost of sending
   nothing during silence.

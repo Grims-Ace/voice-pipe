@@ -155,6 +155,12 @@ impl ProxyProfile {
                 let guild_id = hub.getPlatform(platform).getGuildId();
                 let name = hub.getConfig().getGeneral().getOverflowName();
                 self.SetNickname(guild_id, &Truncate(name, NICKNAME_MAX)).await;
+                self.RemoveAvatar(guild_id).await;
+        }
+
+        // Remove the guild avatar, so that the proxy shows the default
+        // avatar of its bot account. Send nothing when it is already gone.
+        async fn RemoveAvatar(&self, guild_id: &str) {
                 if *self._avatar.lock().unwrap() == AvatarState::Removed {
                         return;
                 }
@@ -205,15 +211,17 @@ impl ProxyAccount {
         // Log out the proxy when the bridge stops.
         pub async fn Close(&self) { self._gateway.Close().await; }
 
-        // Set the idle nickname, so that a free proxy does not keep the
-        // name of the last person or group that it mirrored.
-        pub async fn SetIdleName(&self, guild_id: &str) {
+        // Set the idle nickname and the default avatar, so that a free proxy
+        // does not keep the look of the last person or group that it
+        // mirrored.
+        pub async fn ShowIdle(&self, guild_id: &str) {
                 let name = self._idleName.as_deref();
                 let (rest, bot) = (&self._profile._rest, self.getBotId());
                 let result = rest.SetNickname(guild_id, bot, name).await;
                 if let Err(e) = result {
                         warn!(bot = %bot, error = %e, "cannot set idle name");
                 }
+                self._profile.RemoveAvatar(guild_id).await;
         }
 }
 
@@ -354,14 +362,15 @@ impl ProxySession {
                 Err(Fail(account, guild_id, &error))
         }
 
-        // Leave voice, set the idle name, and show that the proxy stands
-        // by. The proxy stays logged in. Return the account for the pool.
+        // Leave voice, set the idle name and the default avatar, and show
+        // that the proxy stands by. The proxy stays logged in. Return the
+        // account for the pool.
         pub async fn Close(self) -> ProxyAccount {
                 self._voice.Close().await;
                 let gateway = &self._account._gateway;
                 gateway.LeaveVoice(&self._guildId);
                 gateway.SetStatus(IDLE_STATUS);
-                self._account.SetIdleName(&self._guildId).await;
+                self._account.ShowIdle(&self._guildId).await;
                 self._account
         }
 }
