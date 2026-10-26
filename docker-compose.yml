@@ -1,0 +1,26 @@
+# voice-pipe. Setup: see "Run with Docker" in the README.
+
+services:
+  voice-pipe:
+    build: .
+    image: voice-pipe:latest
+    container_name: voice-pipe
+    restart: unless-stopped
+    user: "${PUID:-1000}:${PGID:-1000}"   # from .env
+    volumes:
+      - ./data:/data                      # config.toml and saved state
+    stop_grace_period: 15s
+    ulimits:
+      nofile: 65536
+    # environment:
+    #   RUST_LOG: info,voice_pipe=debug
+    # Self-hosted Fluxer in Docker on this machine:
+    # networks:
+    #   - fluxer
+    # Self-hosted Fluxer not in Docker, on this machine (Linux only):
+    # network_mode: host
+
+# networks:
+#   fluxer:
+#     external: true
+#     name: <Fluxer network>   # see: docker network ls

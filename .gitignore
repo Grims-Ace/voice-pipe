@@ -6,3 +6,5 @@ voice-pipe-state.toml
 .agents
 TODO
 /logs
+/data
+/.env

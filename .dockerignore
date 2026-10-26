@@ -1,0 +1,12 @@
+# Keep tokens, local files, and build output out of the build context.
+.git
+target
+data
+.env
+logs
+config.toml
+voice-pipe-state.toml
+TODO
+.claude
+.gemini
+.agents

@@ -39,8 +39,10 @@ The bridge uses bot accounts on both platforms:
   bot speaks for everyone.
 
 Do the steps below in order. They use the `voice-pipe` binary and
-`config.example.toml` from the latest release. To build the binary
-yourself, see [Build from source](#build-from-source).
+`config.example.toml` from the latest release. On Windows and macOS, or if
+you prefer containers, run the bridge with Docker instead (see
+[Run with Docker](#run-with-docker)). To build the binary yourself, see
+[Build from source](#build-from-source).
 
 ### Requirements
 
@@ -190,6 +192,8 @@ These rules apply to the official instance and to any other machine:
 
 Download the `voice-pipe` binary and `config.example.toml` from the latest
 release, and put them in one directory (for example `/opt/voice-pipe`).
+With Docker, put `config.toml` in a `data` directory next to
+`docker-compose.yml` instead (see [Run with Docker](#run-with-docker)).
 Then make your config from the example:
 
 ```sh
@@ -336,6 +340,67 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now voice-pipe
 journalctl -u voice-pipe -f
 ```
+
+#### Run with Docker
+
+Docker runs the Linux build on Linux, Windows, and macOS (with Docker
+Desktop). `docker-compose.yml` in the base directory of the project builds
+the image from the source on your machine and runs it.
+
+1. Get the source of the latest release, and open its directory.
+2. Make a `data` directory there and put your `config.toml` in it (step
+   4). Make the directory yourself before the first start: if Docker makes
+   it, it belongs to root, and the bridge cannot write to it.
+
+   ```sh
+   mkdir data
+   cp config.example.toml data/config.toml    # then fill it in
+   ```
+
+3. **Linux only.** On Windows and macOS, Docker Desktop handles the file
+   owners, so skip this step.
+
+   Tell Docker which user to run the bridge as. The bridge must be able to
+   write to `data`, because the link commands change `config.toml` and the
+   bridge saves its on/off state there. Copy `.env.example` to `.env`, and
+   set `PUID` and `PGID` to your user and group IDs:
+
+   ```sh
+   cp .env.example .env
+   id -u    # your user ID: put it in PUID
+   id -g    # your group ID: put it in PGID
+   ```
+
+   `docker-compose.yml` reads `PUID` and `PGID` from `.env` (the default is
+   1000 for both). The files that the bridge writes then belong to you.
+
+4. Start the bridge. The first build downloads the WebRTC library and takes
+   a few minutes.
+
+   ```sh
+   docker compose up -d
+   docker compose logs -f      # watch the logs
+   docker compose down         # stop (the bots leave voice first)
+   ```
+
+The Fluxer URLs in `config.toml` depend on where Fluxer runs:
+
+- **Official instance or another machine:** the remote URLs from step 3.
+  No change to `docker-compose.yml`.
+- **Self-hosted Fluxer in Docker on the same machine:** inside the
+  container, `127.0.0.1` is the container itself. Connect voice-pipe to the
+  Docker network of Fluxer: uncomment the two `networks` parts of
+  `docker-compose.yml`, and set the network name (`docker network ls`
+  shows it). Then use the name of the Fluxer edge container in the URLs,
+  for example `http://<edge-container>:8080/api/v1`. Set `host_header` if
+  the edge routes requests by host name.
+- **Self-hosted Fluxer not in Docker, on the same Linux machine:**
+  uncomment `network_mode: host` in `docker-compose.yml`. The default
+  `127.0.0.1` URLs then work. This is not available with Docker Desktop.
+
+Mount the whole `data` directory, as the compose file does, and not only
+`config.toml`. The link commands replace `config.toml` with a rename, and
+a rename over a single mounted file fails in a container.
 
 #### Build from source
 
@@ -646,6 +711,9 @@ src/
     status.rs       Link state and the status report
 vendor/
   songbird/         Songbird 0.6.1 with the DAVE trailer fix (ISC License)
+Dockerfile          Container image (build stage and small runtime stage)
+docker-compose.yml  Run the container with the data directory mounted
+.env.example        Docker settings (PUID, PGID): copy to .env
 ```
 
 Run the tests:
