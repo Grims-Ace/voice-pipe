@@ -314,9 +314,10 @@ async fn RunRoomEvents(
                         }
                         RoomEvent::TrackSubscribed {
                                 track,
+                                publication,
                                 participant,
-                                ..
                         } => {
+                                if !isVoiceTrack(&publication) { continue; }
                                 StartTrackReader(track, &participant, &receive);
                         }
                         RoomEvent::Disconnected { reason } => {
@@ -336,9 +337,7 @@ fn SubscribeIfListening(
         receive: &ReceiveState,
 ) {
         if !receive.isListening() || receive.isOwnBot(participant) { return; }
-        if publication.kind() == TrackKind::Audio {
-                publication.set_subscribed(true);
-        }
+        if isVoiceTrack(publication) { publication.set_subscribed(true); }
 }
 
 fn StartTrackReader(
@@ -396,10 +395,18 @@ fn LogDisconnect(reason: livekit::DisconnectReason) {
 
 fn SetAudioSubscribed(participant: &RemoteParticipant, is_subscribed: bool) {
         for publication in participant.track_publications().values() {
-                if publication.kind() == TrackKind::Audio {
+                if isVoiceTrack(publication) {
                         publication.set_subscribed(is_subscribed);
                 }
         }
+}
+
+// Return true for an audio track of a person's voice. The audio of a screen
+// share is not relayed. Other sources (also Unknown) are relayed, so that a
+// client that does not name its microphone track is still heard.
+fn isVoiceTrack(publication: &RemoteTrackPublication) -> bool {
+        publication.kind() == TrackKind::Audio
+                && publication.source() != TrackSource::ScreenshareAudio
 }
 
 // Fluxer names LiveKit participants "user_<id>_<suffix>". Return the user ID,

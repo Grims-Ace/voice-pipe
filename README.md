@@ -106,6 +106,8 @@ use a proxy as their group bot.
 - Bots do not decode or subscribe to audio until people are in both
   channels. On Discord the voice driver does not decrypt or decode. On
   Fluxer the bot does not subscribe to any audio track.
+- Only voice is relayed. On Fluxer the bot does not subscribe to the audio
+  of a screen share.
 - A speech gate for each person decides what is sent. A frame louder than
   `voice_threshold` opens the gate, and it stays open until the person is
   quiet for `silence_hangover_ms`. Quiet sounds inside speech are sent, so
