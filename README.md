@@ -10,23 +10,57 @@ voice in both directions.
 
 ## Contents
 
-- [Setup](#setup)
+- [Quick start](#quick-start)
+- [Normal setup](#normal-setup)
   - [Requirements](#requirements)
   - [Step 1: Create the Discord bots](#step-1-create-the-discord-bots)
   - [Step 2: Create the Fluxer bots](#step-2-create-the-fluxer-bots)
   - [Step 3: Network setup](#step-3-network-setup)
   - [Step 4: Configure](#step-4-configure)
   - [Step 5: Run](#step-5-run)
-    - [Run natively](#run-natively)
-    - [Run with Docker](#run-with-docker)
+  - [Build from source](#build-from-source)
+- [Docker setup](#docker-setup)
 - [Commands](#commands)
 - [How the bridge works](#how-the-bridge-works)
 - [Troubleshooting](#troubleshooting)
 - [Limits](#limits)
 - [Project layout](#project-layout)
+- [AI Usage Disclaimer](#ai-usage-disclaimer)
 - [License](#license)
 
-## Setup
+## Quick start
+
+1. **Discord:** create a bot, turn on **Message Content Intent**, invite it
+   to your server, and copy its token and the server ID. It needs permission to view channels, send messages, read message history, connect, speak, and change nickname.
+   ([step 1](#step-1-create-the-discord-bots)).
+2. **Fluxer:** create a bot, add it to your community, and copy its token
+   and the community ID ([step 2](#step-2-create-the-fluxer-bots)) The fluxer bot needds the same permissions as the discord bot.
+3. Download the `voice-pipe` binary and `config.example.toml` from the
+   latest release into one directory, and make your config:
+
+   ```sh
+   cp config.example.toml config.toml
+   ```
+
+4. In `config.toml`, fill in `guild_id` and `main_token` under `[discord]`
+   and under `[fluxer]`, and the Fluxer URLs of your instance
+   ([step 3](#step-3-network-setup)).
+5. Start the bridge:
+
+   ```sh
+   chmod +x voice-pipe
+   ./voice-pipe
+   ```
+
+6. Join a voice channel that has the same name on both platforms (for
+   example `General`). The main bot of the other platform joins the
+   linked channel as **Multiple Users** and relays voice.
+
+On Windows or macOS, use the [Docker setup](#docker-setup) instead. For
+proxies (one bot for each person), commands, and service setup, see the
+[Normal setup](#normal-setup).
+
+## Normal setup
 
 The bridge uses bot accounts on both platforms:
 
@@ -42,9 +76,8 @@ The bridge uses bot accounts on both platforms:
 
 Do the steps below in order. They use the `voice-pipe` binary and
 `config.example.toml` from the latest release. On Windows and macOS, or if
-you prefer containers, run the bridge with Docker instead (see
-[Run with Docker](#run-with-docker)). To build the binary yourself, see
-[Build from source](#build-from-source).
+you prefer containers, use the [Docker setup](#docker-setup) instead. To
+build the binary yourself, see [Build from source](#build-from-source).
 
 ### Requirements
 
@@ -194,8 +227,6 @@ These rules apply to the official instance and to any other machine:
 
 Download the `voice-pipe` binary and `config.example.toml` from the latest
 release, and put them in one directory (for example `/opt/voice-pipe`).
-With Docker, put `config.toml` in a `data` directory next to
-`docker-compose.yml` instead (see [Run with Docker](#run-with-docker)).
 Then make your config from the example:
 
 ```sh
@@ -278,10 +309,6 @@ also 15 frames.
 
 ### Step 5: Run
 
-Run the binary directly (natively), or run it in Docker.
-
-#### Run natively
-
 In the directory with the binary and `config.toml`:
 
 ```sh
@@ -298,7 +325,7 @@ working directory by default), and `config.toml` when the link commands
 change it. The user that runs the bridge must be able to write to
 `config.toml` and to the directories of both files.
 
-##### Logs
+#### Logs
 
 ```sh
 RUST_LOG=info,voice_pipe=debug ./voice-pipe
@@ -309,7 +336,7 @@ WebRTC) log only warnings, because Songbird writes several lines each time
 a person starts or stops speaking. `RUST_LOG` replaces the whole filter,
 so it also shows the library logs.
 
-##### Run as a systemd service
+#### Run as a systemd service
 
 This example uses `/opt/voice-pipe` for the binary and `config.toml`, and
 a `voice-pipe` user that owns that directory.
@@ -347,68 +374,7 @@ sudo systemctl enable --now voice-pipe
 journalctl -u voice-pipe -f
 ```
 
-#### Run with Docker
-
-Docker runs the Linux build on Linux, Windows, and macOS (with Docker
-Desktop). `docker-compose.yml` in the base directory of the project builds
-the image from the source on your machine and runs it.
-
-1. Get the source of the latest release, and open its directory.
-2. Make a `data` directory there and put your `config.toml` in it (step
-   4). Make the directory yourself before the first start: if Docker makes
-   it, it belongs to root, and the bridge cannot write to it.
-
-   ```sh
-   mkdir data
-   cp config.example.toml data/config.toml    # then fill it in
-   ```
-
-3. **Linux only.** On Windows and macOS, Docker Desktop handles the file
-   owners, so skip this step.
-
-   Tell Docker which user to run the bridge as. The bridge must be able to
-   write to `data`, because the link commands change `config.toml` and the
-   bridge saves its on/off state there. Copy `.env.example` to `.env`, and
-   set `PUID` and `PGID` to your user and group IDs:
-
-   ```sh
-   cp .env.example .env
-   id -u    # your user ID: put it in PUID
-   id -g    # your group ID: put it in PGID
-   ```
-
-   `docker-compose.yml` reads `PUID` and `PGID` from `.env` (the default is
-   1000 for both). The files that the bridge writes then belong to you.
-
-4. Start the bridge. The first build downloads the WebRTC library and takes
-   a few minutes.
-
-   ```sh
-   docker compose up -d
-   docker compose logs -f      # watch the logs
-   docker compose down         # stop (the bots leave voice first)
-   ```
-
-The Fluxer URLs in `config.toml` depend on where Fluxer runs:
-
-- **Official instance or another machine:** the remote URLs from step 3.
-  No change to `docker-compose.yml`.
-- **Self-hosted Fluxer in Docker on the same machine:** inside the
-  container, `127.0.0.1` is the container itself. Connect voice-pipe to the
-  Docker network of Fluxer: uncomment the two `networks` parts of
-  `docker-compose.yml`, and set the network name (`docker network ls`
-  shows it). Then use the name of the Fluxer edge container in the URLs,
-  for example `http://<edge-container>:8080/api/v1`. Set `host_header` if
-  the edge routes requests by host name.
-- **Self-hosted Fluxer not in Docker, on the same Linux machine:**
-  uncomment `network_mode: host` in `docker-compose.yml`. The default
-  `127.0.0.1` URLs then work. This is not available with Docker Desktop.
-
-Mount the whole `data` directory, as the compose file does, and not only
-`config.toml`. The link commands replace `config.toml` with a rename, and
-a rename over a single mounted file fails in a container.
-
-#### Build from source
+### Build from source
 
 To build the binary yourself instead of using the latest release, you
 need:
@@ -416,10 +382,11 @@ need:
 - **Rust 1.88 or newer, with Cargo** (the Rust build tool). The easiest way
   to get both is [rustup](https://rustup.rs). The Rust packages of some
   distributions are older than 1.88; check with `cargo --version`.
-- **A C/C++ compiler and CMake.** The Discord voice library builds libopus.
-  The LiveKit library (Fluxer voice) downloads a prebuilt WebRTC library on
-  the first build, so the first build needs internet access and takes a
-  few minutes.
+- **Clang 21 or newer, a C/C++ compiler, and CMake.** The Discord voice
+  library builds libopus. The LiveKit library (Fluxer voice) downloads a
+  prebuilt WebRTC library on the first build, which needs clang 21 or
+  newer, so the first build needs internet access and takes a few
+  minutes. Check with `clang --version`.
 
 Arch Linux (the `rust` package includes Cargo):
 
@@ -427,12 +394,15 @@ Arch Linux (the `rust` package includes Cargo):
 sudo pacman -S --needed rust base-devel cmake clang pkgconf
 ```
 
-Debian or Ubuntu (install Rust and Cargo with rustup, because the Rust
-packages of these distributions can be older than 1.88):
+Debian or Ubuntu: install Rust and Cargo with rustup, and clang from the
+LLVM project ([apt.llvm.org](https://apt.llvm.org)), because the packages
+of these distributions can be too old. Then tell the build to use that
+clang (replace `23` with the version that you installed):
 
 ```sh
-sudo apt install build-essential cmake clang pkg-config
+sudo apt install build-essential cmake pkg-config
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+export CC=clang-23 CXX=clang++-23
 ```
 
 Then, in the source directory:
@@ -450,6 +420,86 @@ trailer to the Opus decoder with the audio, which damages the audio of
 Discord users whose client sends CELT (for example, some clients with a
 webcam on). The patch is in `vendor/songbird-dave-trailer.patch`. If a
 fix for this in Songbird is released, the patch will be removed.
+
+## Docker setup
+
+Docker runs the Linux build on Linux, Windows, and macOS (with Docker
+Desktop). `docker-compose.yml` in the base directory of the project builds
+the image from the source on your machine and runs it, so you need no
+Docker account and no image registry.
+
+1. Do steps 1 to 3 of the Normal setup: create the
+   [Discord bots](#step-1-create-the-discord-bots) and the
+   [Fluxer bots](#step-2-create-the-fluxer-bots), and choose the Fluxer
+   URLs for your instance ([network setup](#step-3-network-setup), and
+   see [Fluxer URLs in Docker](#fluxer-urls-in-docker) below).
+2. Get the source of the latest release, and open its directory.
+3. Make a `data` directory there and put your `config.toml` in it. Make
+   the directory yourself before the first start: if Docker makes it, it
+   belongs to root, and the bridge cannot write to it.
+
+   ```sh
+   mkdir data
+   cp config.example.toml data/config.toml
+   ```
+
+   Fill in `data/config.toml` as in [step 4](#step-4-configure).
+
+4. **Linux only.** On Windows and macOS, Docker Desktop handles the file
+   owners, so skip this step.
+
+   Tell Docker which user to run the bridge as. The bridge must be able to
+   write to `data`, because the link commands change `config.toml` and the
+   bridge saves its on/off state there. Copy `.env.example` to `.env`, and
+   set `PUID` and `PGID` to your user and group IDs:
+
+   ```sh
+   cp .env.example .env
+   id -u    # your user ID: put it in PUID
+   id -g    # your group ID: put it in PGID
+   ```
+
+   `docker-compose.yml` reads `PUID` and `PGID` from `.env` (the default is
+   1000 for both). The files that the bridge writes then belong to you.
+
+5. Start the bridge. The first start builds the image, which downloads the
+   WebRTC library and takes a few minutes.
+
+   ```sh
+   docker compose up -d
+   docker compose logs -f      # watch the logs
+   docker compose down         # stop (the bots leave voice first)
+   ```
+
+After you download the source of a new release, build the image again:
+
+```sh
+docker compose up -d --build
+```
+
+For more log detail, uncomment the `environment` part of
+`docker-compose.yml` (see [Logs](#logs)).
+
+### Fluxer URLs in Docker
+
+The Fluxer URLs in `config.toml` depend on where Fluxer runs:
+
+- **Official instance or another machine:** the remote URLs from
+  [step 3](#step-3-network-setup). No change to `docker-compose.yml`.
+- **Self-hosted Fluxer in Docker on the same machine:** inside the
+  container, `127.0.0.1` is the container itself. Connect voice-pipe to the
+  Docker network of Fluxer: uncomment the two `networks` parts of
+  `docker-compose.yml`, and set the network name (`docker network ls`
+  shows it). Then use the name of the Fluxer edge container in the URLs,
+  for example `http://<edge-container>:8080/api/v1`. Set `host_header` if
+  the edge routes requests by host name.
+- **Self-hosted Fluxer not in Docker, on the same Linux machine:**
+  uncomment `network_mode: host` in `docker-compose.yml`. The default
+  `127.0.0.1` URLs then work. This is not available with Docker Desktop.
+
+Mount the whole `data` directory, as the compose file does, and not only
+`config.toml`. The link commands replace `config.toml` with a rename, and
+a rename over a single mounted file fails in a container.
 
 ## Commands
 
@@ -727,6 +777,16 @@ Run the tests:
 ```sh
 cargo test
 ```
+
+## AI Usage Disclaimer
+
+Voice Pipe was developed with the help of AI. 
+I (Grimsace) use it as a tool to help troubleshoot bugs, aid in writing some code,
+gather information, and for writing tests. AI is a tool and is an aid to
+help me develop the bridge in the way I want, not the other way around. I will not
+use AI for final code review before releases, and I will not use AI to interact
+with you if you want to contribute to the project and I ask that you do the
+same if you'd like to contribute.
 
 ## License
 
