@@ -25,7 +25,7 @@ use songbird::tracks::TrackHandle;
 use songbird::{Config, ConnectionInfo};
 use symphonia_core::io::MediaSource;
 use tokio::sync::mpsc;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::{AudioTuning, SEND_QUEUE, SpeakerFrame, VoiceTarget};
 use crate::audio::gate::SpeechGate;
@@ -58,8 +58,10 @@ const DAVE_MAGIC_MARKER: [u8; 2] = [0xFA, 0xFA];
 
 // A bot in a Discord voice channel.
 pub struct DiscordVoice {
+        _botId: String,
         _driver: Mutex<Driver>,
         _output: mpsc::Sender<AudioFrame>,
+        _streams: Arc<Mutex<StreamMap>>,
         _isListening: Arc<AtomicBool>,
         _isConnected: Arc<AtomicBool>,
 }
@@ -76,6 +78,7 @@ struct StreamMap {
 // Records the audio stream of each user, and forgets the streams of users
 // that leave.
 struct SsrcTracker {
+        _botId: String,
         _streams: Arc<Mutex<StreamMap>>,
 }
 
@@ -178,8 +181,14 @@ impl DiscordVoice {
                 let info = BuildConnectionInfo(server, target)?;
                 let is_listening = Arc::new(AtomicBool::new(false));
                 let is_connected = Arc::new(AtomicBool::new(true));
+                let streams = Arc::new(Mutex::new(StreamMap::default()));
                 let mut driver = Driver::new(BuildConfig());
-                AddReceiveEvents(&mut driver, target, is_listening.clone());
+                AddReceiveEvents(
+                        &mut driver,
+                        target,
+                        is_listening.clone(),
+                        streams.clone(),
+                );
                 AddConnectionEvents(&mut driver, is_connected.clone());
                 driver.connect(info).await.map_err(|e| {
                         anyhow!("Discord voice connect failed: {e}")
@@ -194,8 +203,10 @@ impl DiscordVoice {
                         "joined Discord voice",
                 );
                 Ok(Self {
+                        _botId: target.getBotId().to_string(),
                         _driver: Mutex::new(driver),
                         _output: output,
+                        _streams: streams,
                         _isListening: is_listening,
                         _isConnected: is_connected,
                 })
@@ -207,9 +218,20 @@ impl DiscordVoice {
         }
 
         // Receive audio only while the bot listens. VoiceReceiver checks
-        // this flag on every voice tick.
+        // this flag on every voice tick. When the bot starts to listen, log
+        // the users whose audio stream it knows: Songbird drops the audio
+        // of any other user without a log, until Discord names the stream
+        // of that user (when the user starts to speak).
         pub fn SetListening(&self, is_listening: bool) {
-                self._isListening.store(is_listening, Ordering::Relaxed);
+                let flag = &self._isListening;
+                let was = flag.swap(is_listening, Ordering::Relaxed);
+                if !is_listening || was { return; }
+                let known = self._streams.lock().unwrap().getKnownUsers();
+                info!(
+                        bot = %self._botId,
+                        known = %known.join(", "),
+                        "Discord listener started, audio streams known for",
+                );
         }
 
         pub fn Close(self) { self._driver.lock().unwrap().leave(); }
@@ -226,7 +248,15 @@ impl EventHandler for SsrcTracker {
                 match ctx {
                         EventContext::SpeakingStateUpdate(speaking) => {
                                 let user = speaking.user_id?.0.to_string();
-                                streams.SetAudioStream(speaking.ssrc, user);
+                                let ssrc = speaking.ssrc;
+                                if streams.SetAudioStream(ssrc, user.clone()) {
+                                        debug!(
+                                                bot = %self._botId,
+                                                %user,
+                                                ssrc,
+                                                "Discord audio stream known",
+                                        );
+                                }
                         }
                         EventContext::ClientDisconnect(left) => {
                                 streams.RemoveUser(&left.user_id.0.to_string());
@@ -492,10 +522,19 @@ impl StreamMap {
         }
 
         // Record the stream that a user names when they start to speak. It
-        // replaces the older audio stream of that user.
-        fn SetAudioStream(&mut self, ssrc: u32, user: String) {
+        // replaces the older audio stream of that user. Return true if the
+        // stream of the user is new.
+        fn SetAudioStream(&mut self, ssrc: u32, user: String) -> bool {
                 self._streamUsers.insert(ssrc, user.clone());
-                self._audioStreams.insert(user, ssrc);
+                self._audioStreams.insert(user, ssrc) != Some(ssrc)
+        }
+
+        // Return the users whose audio stream is known, in ID order.
+        fn getKnownUsers(&self) -> Vec<String> {
+                let mut users: Vec<String> =
+                        self._audioStreams.keys().cloned().collect();
+                users.sort();
+                users
         }
 
         fn RemoveUser(&mut self, user: &str) {
@@ -649,12 +688,15 @@ fn AddReceiveEvents(
         driver: &mut Driver,
         target: &VoiceTarget,
         is_listening: Arc<AtomicBool>,
+        streams: Arc<Mutex<StreamMap>>,
 ) {
-        let streams = Arc::new(Mutex::new(StreamMap::default()));
         let events =
                 [CoreEvent::SpeakingStateUpdate, CoreEvent::ClientDisconnect];
         for event in events {
-                let tracker = SsrcTracker { _streams: streams.clone() };
+                let tracker = SsrcTracker {
+                        _botId: target.getBotId().to_string(),
+                        _streams: streams.clone(),
+                };
                 driver.add_global_event(Event::Core(event), tracker);
         }
         let tuning = target.getTuning();

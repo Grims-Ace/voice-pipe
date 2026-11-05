@@ -65,8 +65,9 @@ proxies (one bot for each person), commands, and service setup, see the
 The bridge uses bot accounts on both platforms:
 
 - **One main bot for each platform.** It watches the voice channels and
-  answers the chat commands. When there are not enough proxy bots, it
-  joins voice as **Multiple Users** and speaks for everyone.
+  answers the chat commands. When there are not enough proxy bots and no
+  proxy is in the channel yet, it joins voice as **Multiple Users** and
+  speaks for everyone.
 - **Proxy bots (optional, any number for each platform).** A proxy copies
   the name and avatar of one person from the other platform while that
   person is in voice. Make one proxy for each person that you expect on
@@ -582,12 +583,18 @@ The mirrors in a channel work in one of two modes:
 - **Single proxies.** When there is a free proxy for each person, each
   person gets their own proxy.
 - **Group bot.** When there are not enough proxies, one bot speaks for all
-  the people with the nickname **Multiple Users**. This is the main bot. If
-  the main bot is already a group bot in another link, a proxy becomes the
-  group bot. When a proxy of the channel is already in voice, it only
-  changes its name, so it does not leave and join again. When a group bot
-  is in voice, all the single proxies of that channel leave, so that other
-  links can use them.
+  the people with the nickname **Multiple Users**. The bridge uses, in
+  this order:
+  1. A proxy that is already in the channel (the listener if possible). It
+     only changes its name, so it does not leave and join again.
+  2. The main bot, if it is not a group bot in another link.
+  3. A free proxy.
+
+  A bot that is already in the channel comes first because Discord tells a
+  bot which audio stream belongs to which person only when that person
+  starts to speak. A bot that joins later cannot hear the people that do
+  not start to speak again. When a group bot is in voice, all the other
+  single proxies of that channel leave, so that other links can use them.
 
 A channel goes back to single proxies when enough proxies are free for all
 of its people for 10 seconds. The new proxies join first, and the group bot

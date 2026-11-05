@@ -555,10 +555,15 @@ impl Side {
         // Group Bot
         // ====================================================================
 
-        // Start a bot that speaks for all users: the main bot if it is
-        // free, else a proxy that is in this channel, else a free proxy.
+        // Start a bot that speaks for all users: a proxy that is in this
+        // channel, else the main bot if it is free, else a free proxy. A
+        // proxy in voice comes first, because its connection already knows
+        // the audio stream of each person: Discord names the stream of a
+        // person only when that person starts to speak, so a bot that joins
+        // now cannot hear the people that do not start to speak again.
+        // SyncGroup then closes the other single proxies of this channel.
         fn StartGroup(&mut self) {
-                if self.TryOpenMain() || self.TryPromoteProxy() { return; }
+                if self.TryPromoteProxy() || self.TryOpenMain() { return; }
                 if let Some(account) = self.getPlatformHub().AcquireProxy() {
                         self.OpenProxy(ProxyLook::Group, account);
                 }
@@ -605,16 +610,17 @@ impl Side {
         }
 
         // Make a single proxy of this channel the group bot. It is already
-        // in voice, so it only changes its name and avatar.
+        // in voice, so it only changes its name and avatar. Prefer the
+        // proxy that listens now, so that the listener does not change.
         fn TryPromoteProxy(&mut self) -> bool {
-                let Some(user) = self
-                        ._proxies
-                        .iter()
-                        .find(|(_, s)| s.getVoice().isConnected())
-                        .map(|(user, _)| user.clone())
-                else {
+                let Some(user) = self.FindProxyToPromote() else {
                         return false;
                 };
+                // A listener keeps listening as the group bot. Clear the role
+                // first, so that TakeProxy does not stop it.
+                let listener = Some(Listener::Proxy(user.clone()));
+                let is_listener = self._listener == listener;
+                if is_listener { self._listener = None; }
                 let Some(mut session) = self.TakeProxy(&user) else {
                         return false;
                 };
@@ -625,11 +631,28 @@ impl Side {
                 info!(
                         platform = %self._platform,
                         %user,
-                        "main bot is busy, a proxy speaks for the group",
+                        "a proxy in the channel speaks for the group",
                 );
                 self.SpawnLookChange(&session, ProxyLook::Group);
                 self._group = Some(GroupBot::Proxy(session));
+                if is_listener { self._listener = Some(Listener::Group); }
                 true
+        }
+
+        // Return the user of the proxy to promote: the listener if it is a
+        // connected proxy, else any connected proxy.
+        fn FindProxyToPromote(&self) -> Option<String> {
+                let is_connected = |user: &String| {
+                        self._proxies
+                                .get(user)
+                                .is_some_and(|s| s.getVoice().isConnected())
+                };
+                if let Some(Listener::Proxy(user)) = &self._listener
+                        && is_connected(user)
+                {
+                        return Some(user.clone());
+                }
+                self._proxies.keys().find(|u| is_connected(u)).cloned()
         }
 
         // Take the group bot out of voice. Return the task that closes it.
