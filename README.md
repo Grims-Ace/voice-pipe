@@ -34,7 +34,7 @@ voice in both directions.
    to your server, and copy its token and the server ID. It needs permission to view channels, send messages, read message history, connect, speak, and change nickname.
    ([step 1](#step-1-create-the-discord-bots)).
 2. **Fluxer:** create a bot, add it to your community, and copy its token
-   and the community ID ([step 2](#step-2-create-the-fluxer-bots)) The fluxer bot needds the same permissions as the discord bot.
+   and the community ID ([step 2](#step-2-create-the-fluxer-bots)) The fluxer bot needs the same permissions as the discord bot.
 3. Download the `voice-pipe` binary and `config.example.toml` from the
    latest release into one directory, and make your config:
 
