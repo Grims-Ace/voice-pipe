@@ -741,8 +741,7 @@ cannot be reached), it starts again on the same schedule.
   different person, a group, or the default avatar when the proxy is
   free. Discord and Fluxer can still delay many quick changes.
 - **Speech start.** After silence, the first 20 to 60 ms of speech can be
-  lost while the receivers fill their buffers. This is the cost of sending
-  nothing during silence.
+  lost while the receivers fill their buffers.
 
 ## Project layout
 
